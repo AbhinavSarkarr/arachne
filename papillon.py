@@ -38,11 +38,14 @@ CLICK_THROUGH = True
 MOUSE_REPEL_RADIUS = 160
 MOUSE_REPEL_STRENGTH = 2.0
 
-GLIDE_SINK = 0.003
-FLAP_LIFT = 2.5
-LIFT_BIAS = 0.002
-FLAP_THRUST = 0.10
-DRAG = 0.98
+# Flight rhythm, in 1/60 s physics steps and pixels per step.
+CRUISE_FRAMES = (120, 180)
+HOVER_FRAMES = (30, 90)
+CRUISE_SPEED = (0.7, 1.2)
+HOVER_SPEED = 0.12
+TURN_RANGE = (0.5, 1.8)
+MAX_TURN_RATE = 0.035
+GLIDE_SINK = 0.12
 
 PRESETS = {
     "monarch": {
@@ -552,7 +555,12 @@ def spawn_position(sw, sh):
 
 # ── Butterfly ───────────────────────────────────────────
 
+def _wrap_angle(a):
+    return (a + math.pi) % math.tau - math.pi
+
+
 class Butterfly:
+    """Cruise straight -> slow down -> hover and turn -> accelerate away."""
 
     def __init__(self, x, y, vx, vy, sw, sh):
         self.x = x
@@ -563,159 +571,141 @@ class Butterfly:
         self.sh = sh
 
         self.scale = random.uniform(MIN_SCALE, MAX_SCALE)
-        self.angle = math.degrees(math.atan2(vy, vx))
-
-        self.phase = random.uniform(0, math.tau)
-        self.base_flap_speed = random.uniform(0.12, 0.22)
-
         self.preset_name = random.choice(PRESET_NAMES)
 
         scale_norm = (self.scale - MIN_SCALE) / max(1, MAX_SCALE - MIN_SCALE)
         self.energy = (1.3 - scale_norm * 0.6) * random.uniform(0.85, 1.15)
-        self.base_flap_speed *= self.energy
+        self.base_flap_speed = random.uniform(0.12, 0.22) * self.energy
+        self.cruise_speed = random.uniform(*CRUISE_SPEED) * math.sqrt(self.energy)
 
+        self.phase = random.uniform(0, math.tau)
         self.heading = math.atan2(vy, vx)
+        self.target_heading = self.heading
+        self.angle = math.degrees(self.heading)
+        self.speed = min(math.hypot(vx, vy), self.cruise_speed)
         self.turn_rate = 0.0
 
-        self.beat_index = math.floor(self.phase / math.tau)
-        self.last_swerve_sign = random.choice((-1, 1))
-
+        self.escape_x = self.escape_y = 0.0
+        self.drift_x = self.drift_y = 0.0
+        self.bob = 0.0
         self.flapping = True
-        self.cycle_timer = 0
-        self.burst_len = random.randint(45, 95)
-        self.glide_len = random.randint(25, 65)
-        self.beat_power = 1.0
+        self._start_cruise()
 
         self.born = time.monotonic()
-
         self.model = ButterflyModel(self.scale, self.preset_name)
         self.wing_theta = 0.3
 
+    def _start_cruise(self):
+        self.state = "cruise"
+        self.state_timer = random.randint(*CRUISE_FRAMES)
+        self.glide_left = 0
+        self.glide_at = (
+            random.randint(40, self.state_timer - 40)
+            if random.random() < 0.6 else -1
+        )
+
+    def _pick_new_heading(self):
+        margin_x, margin_y = self.sw * 0.15, self.sh * 0.15
+        near_edge = (
+            self.x < margin_x or self.x > self.sw - margin_x
+            or self.y < margin_y or self.y > self.sh - margin_y
+        )
+        if near_edge:
+            inward = math.atan2(self.sh / 2 - self.y, self.sw / 2 - self.x)
+            self.target_heading = inward + random.uniform(-0.6, 0.6)
+        else:
+            turn = random.uniform(*TURN_RANGE) * random.choice((-1, 1))
+            self.target_heading = self.heading + turn
+
     def update(self, mx, my):
+        self.state_timer -= 1
 
-        # ── Burst / glide cycle ──────────────────────────
-        self.cycle_timer += 1
-
-        if self.flapping:
-            self.phase += self.base_flap_speed
-            self.beat_power = max(0.6, self.beat_power * 0.995)
-            if self.cycle_timer >= self.burst_len:
-                self.flapping = False
-                self.cycle_timer = 0
-                self.glide_len = random.randint(25, 65)
-        else:
-            target_phase = math.pi * 0.5
-            phase_norm = self.phase % math.tau
-            dp = target_phase - phase_norm
-            if dp > math.pi:
-                dp -= math.tau
-            elif dp < -math.pi:
-                dp += math.tau
-            self.phase += dp * 0.03
-
-            if self.cycle_timer >= self.glide_len:
+        # ── Behaviour state ──────────────────────────────
+        if self.state == "cruise":
+            target_speed = self.cruise_speed
+            self.target_heading += random.gauss(0, 0.002)
+            if self.glide_left > 0:
+                self.glide_left -= 1
+            elif self.state_timer == self.glide_at:
+                self.glide_left = random.randint(20, 40)
+            self.flapping = self.glide_left == 0
+            if self.state_timer <= 0:
+                self.state = "hover"
+                self.state_timer = random.randint(*HOVER_FRAMES)
+                self.glide_left = 0
                 self.flapping = True
-                self.cycle_timer = 0
-                self.burst_len = random.randint(45, 95)
-                self.beat_power = 1.2 + random.uniform(0, 0.2)
-
-        # ── Wing-beat forces ─────────────────────────────
-        if self.flapping:
-            beat = math.sin(self.phase * 2)
-            self.vy -= (
-                beat * self.base_flap_speed * FLAP_LIFT
-                * self.beat_power + LIFT_BIAS
-            )
-
-            effort = (
-                abs(math.cos(self.phase)) * self.base_flap_speed
-            )
-            self.vx += (math.cos(self.heading) * effort
-                        * FLAP_THRUST * self.beat_power)
-            self.vy += (math.sin(self.heading) * effort
-                        * FLAP_THRUST * self.beat_power)
+                self._pick_new_heading()
+        elif self.state == "hover":
+            target_speed = HOVER_SPEED
+            error = _wrap_angle(self.target_heading - self.heading)
+            if self.state_timer <= 0 and abs(error) < 0.05:
+                self.state = "go"
         else:
-            self.vy += GLIDE_SINK
+            target_speed = self.cruise_speed
+            if self.speed > self.cruise_speed * 0.9:
+                self._start_cruise()
 
-        # ── Heading: gentle drift, smooth curves while gliding ──
-        if self.flapping:
-            self.turn_rate += random.gauss(0, 0.008 * self.energy)
-            self.turn_rate *= 0.93
-        else:
-            self.turn_rate += random.gauss(0, 0.0025 * self.energy)
-            self.turn_rate *= 0.97
-        turn_limit = 0.04 * self.energy
-        self.turn_rate = max(-turn_limit, min(turn_limit, self.turn_rate))
+        # ── Speed eases in and out ───────────────────────
+        ease = 0.06 if target_speed < self.speed else 0.03
+        self.speed += (target_speed - self.speed) * ease
+
+        # ── Smooth turning (only once slowed while hovering) ──
+        error = _wrap_angle(self.target_heading - self.heading)
+        rate = max(-MAX_TURN_RATE, min(MAX_TURN_RATE, error * 0.06))
+        if self.state == "hover" and self.speed > self.cruise_speed * 0.5:
+            rate = 0.0
+        self.turn_rate += (rate - self.turn_rate) * 0.2
         self.heading += self.turn_rate
 
-        # ── Zig-zag: jinks happen on a wingbeat, usually alternating ──
-        beat = math.floor(self.phase / math.tau)
-        if self.flapping and beat != self.beat_index and random.random() < 0.6:
-            if random.random() < 0.75:
-                sign = -self.last_swerve_sign
-            else:
-                sign = self.last_swerve_sign
-            self.last_swerve_sign = sign
-            swerve = sign * random.uniform(0.3, 0.6) * self.energy
-            self.heading += swerve
-            self.turn_rate = swerve * 0.3
-            spd = math.hypot(self.vx, self.vy)
-            if spd > 0.3:
-                redir = min(0.5, 0.7 * abs(swerve))
-                self.vx = self.vx * (1 - redir) + math.cos(self.heading) * spd * redir
-                self.vy = self.vy * (1 - redir) + math.sin(self.heading) * spd * redir
-        self.beat_index = beat
-
-        speed = math.hypot(self.vx, self.vy)
-        if speed > 0.5:
-            vel_angle = math.atan2(self.vy, self.vx)
-            hd = ((vel_angle - self.heading + math.pi)
-                  % math.tau) - math.pi
-            self.heading += hd * 0.04
-
-        # ── Mouse repulsion ──────────────────────────────
-        dx = self.x - mx
-        dy = self.y - my
-        dist = math.hypot(dx, dy)
-
-        if 1 < dist < MOUSE_REPEL_RADIUS:
-            f = (
-                (1 - dist / MOUSE_REPEL_RADIUS)
-                * MOUSE_REPEL_STRENGTH
-            )
-            self.vx += dx / dist * f * 0.08
-            self.vy += dy / dist * f * 0.08
-
-        # ── Micro-corrections (chaotic flight) ────────────
-        jitter = (0.015 if self.flapping else 0.006) * self.energy
-        self.vx += random.gauss(0, jitter)
-        self.vy += random.gauss(0, jitter)
-
-        # ── Air resistance ───────────────────────────────
-        self.vx *= DRAG
-        self.vy *= DRAG
-
-        max_speed = 3.0 + self.energy * 0.8
-        if speed > max_speed:
-            self.vx *= max_speed / speed
-            self.vy *= max_speed / speed
-
-        # ── Position ─────────────────────────────────────
-        self.x += self.vx
-        self.y += self.vy
-
-        # ── Visual angle tracks velocity ─────────────────
-        if speed > 0.3:
-            ta = math.degrees(math.atan2(self.vy, self.vx))
-            diff = (ta - self.angle + 180) % 360 - 180
-            self.angle += diff * 0.12
-
-        # ── Wing hinge angle (CodePen: fold + 0.24 + sin·0.43) ──
+        # ── Wings ────────────────────────────────────────
         if self.flapping:
+            flap_mult = 1.15 if self.state == "hover" else 1.0
+            self.phase += self.base_flap_speed * flap_mult
             target = 0.3 + 0.85 * math.sin(self.phase)
         else:
             target = 0.22
         self.wing_theta += (target - self.wing_theta) * 0.5
+
+        # Body rises on each downstroke; a hovering flutter bobs more.
+        if self.flapping:
+            amp = self.scale * (0.18 if self.state == "hover" else 0.09)
+            bob_target = -amp * math.sin(self.phase)
+        else:
+            bob_target = 0.0
+        self.bob += (bob_target - self.bob) * 0.3
+
+        # ── Hover drift ──────────────────────────────────
+        drift = 0.02 if self.state == "hover" else 0.004
+        self.drift_x = self.drift_x * 0.95 + random.gauss(0, drift)
+        self.drift_y = self.drift_y * 0.95 + random.gauss(0, drift)
+
+        # ── Mouse: dart away ─────────────────────────────
+        dx = self.x - mx
+        dy = self.y - my
+        dist = math.hypot(dx, dy)
+        if 1 < dist < MOUSE_REPEL_RADIUS:
+            push = (1 - dist / MOUSE_REPEL_RADIUS) * MOUSE_REPEL_STRENGTH
+            self.escape_x += dx / dist * push * 0.25
+            self.escape_y += dy / dist * push * 0.25
+            self.target_heading = math.atan2(dy, dx)
+            if self.state == "hover":
+                self.state = "go"
+        self.escape_x *= 0.93
+        self.escape_y *= 0.93
+
+        # ── Motion ───────────────────────────────────────
+        tx = math.cos(self.heading) * self.speed
+        ty = math.sin(self.heading) * self.speed
+        self.vx += (tx - self.vx) * 0.15
+        self.vy += (ty - self.vy) * 0.15
+
+        self.x += self.vx + self.escape_x + self.drift_x
+        self.y += self.vy + self.escape_y + self.drift_y
+        if not self.flapping:
+            self.y += GLIDE_SINK
+
+        diff = (math.degrees(self.heading) - self.angle + 180) % 360 - 180
+        self.angle += diff * 0.15
 
         # ── Screen wrap ──────────────────────────────────
         m = self.scale * 4
@@ -791,6 +781,7 @@ def draw_butterfly(painter, b):
     m = b.model
     ss = SUPERSAMPLE
     r = b.scale * ss
+    by = b.y + b.bob
 
     pitch = max(-0.45, min(0.45, -b.vy * 0.12))
     if b.flapping:
@@ -834,7 +825,7 @@ def draw_butterfly(painter, b):
     )
 
     left = b.x + x0 / ss
-    top = b.y + y0 / ss
+    top = by + y0 / ss
     w_disp = w_px / ss
     h_disp = h_px / ss
 
@@ -855,18 +846,18 @@ def draw_butterfly(painter, b):
     for side in (-1, 1):
         pts = ANTENNA * np.array([side, 1.0, 1.0])
         xs, ys = _project(pts.astype(np.float32), body, s)
-        path = QPainterPath(QPointF(b.x + xs[0], b.y + ys[0]))
+        path = QPainterPath(QPointF(b.x + xs[0], by + ys[0]))
         path.cubicTo(
-            QPointF(b.x + xs[1], b.y + ys[1]),
-            QPointF(b.x + xs[2], b.y + ys[2]),
-            QPointF(b.x + xs[3], b.y + ys[3]),
+            QPointF(b.x + xs[1], by + ys[1]),
+            QPointF(b.x + xs[2], by + ys[2]),
+            QPointF(b.x + xs[3], by + ys[3]),
         )
         painter.drawPath(path)
         painter.save()
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(48, 41, 31))
         painter.drawEllipse(
-            QPointF(b.x + xs[3], b.y + ys[3]), s * 0.045, s * 0.045
+            QPointF(b.x + xs[3], by + ys[3]), s * 0.045, s * 0.045
         )
         painter.restore()
 
