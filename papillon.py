@@ -27,19 +27,15 @@ import numpy as np
 
 # ── Configuration ───────────────────────────────────────
 
-DURATION_SECONDS = 120
-BUTTERFLY_COUNT = 24
 FPS = 60
 SPAWN_INTERVAL_MS = 350
-
-MIN_SCALE = 12
-MAX_SCALE = 22
+MAX_ON_SCREEN = 20
+ROTATION_SPAWN_MS = 4000
 
 CLICK_THROUGH = True
 MOUSE_REPEL_RADIUS = 160
 MOUSE_REPEL_STRENGTH = 2.0
 
-# Flight rhythm, in 1/60 s physics steps and pixels per step.
 CRUISE_FRAMES = (120, 180)
 HOVER_FRAMES = (30, 90)
 CRUISE_SPEED = (0.7, 1.2)
@@ -48,81 +44,140 @@ TURN_RANGE = (0.5, 1.8)
 MAX_TURN_RATE = 0.035
 GLIDE_SINK = 0.12
 
-PRESETS = {
-    "monarch": {
-        "primary": QColor("#e18a32"),
-        "secondary": QColor("#f5c66b"),
-        "edge": QColor("#211d19"),
-    },
-    "morpho": {
-        "primary": QColor("#269ac9"),
-        "secondary": QColor("#9cd9e5"),
-        "edge": QColor("#172c35"),
-    },
-    "luna": {
-        "primary": QColor("#b9cd8b"),
-        "secondary": QColor("#e9e5b0"),
-        "edge": QColor("#535640"),
-    },
-}
-
-PRESET_NAMES = list(PRESETS.keys())
+RARITY_UNLOCK = {0: 0, 1: 30, 2: 90, 3: 180}
+RARITY_WEIGHT = {0: 10, 1: 5, 2: 2, 3: 1}
 
 
-# ── Wing outline paths (CodePen coordinates, Y negated for Qt) ──
+# ── Species catalog ────────────────────────────────────
 
-def make_forewing(s):
+def _sp(name, rarity, pri, sec, edge, fw=(1.0, 1.0), hw=(1.0, 1.0),
+        tail=0.0, size=(12, 20), spec=0.10, eyespots=False,
+        vein_scale=1.0, wing_alpha=1.0):
+    return {
+        "name": name, "rarity": rarity,
+        "primary": QColor(pri), "secondary": QColor(sec), "edge": QColor(edge),
+        "fw_sx": fw[0], "fw_sy": fw[1],
+        "hw_sx": hw[0], "hw_sy": hw[1],
+        "tail": tail, "size": size,
+        "spec": spec, "eyespots": eyespots,
+        "vein_scale": vein_scale, "wing_alpha": wing_alpha,
+    }
+
+
+SPECIES = [
+    # Common (rarity 0) — always
+    _sp("cabbage_white",     0, "#f0edd8", "#fefefa", "#4a4a3e",
+        fw=(0.88, 0.90), hw=(0.85, 0.85), size=(10, 16)),
+    _sp("painted_lady",      0, "#d4793c", "#f0c08a", "#2e1f14",
+        hw=(0.95, 0.92), size=(11, 17)),
+    _sp("monarch",           0, "#e18a32", "#f5c66b", "#211d19",
+        size=(12, 20)),
+    _sp("common_blue",       0, "#5b8ec9", "#a8cce8", "#1a2433",
+        fw=(0.82, 0.85), hw=(0.80, 0.80), size=(9, 14)),
+    # Uncommon (rarity 1) — after 30 s
+    _sp("red_admiral",       1, "#8b2b1a", "#e04825", "#1a1410",
+        fw=(1.02, 1.0), size=(12, 18)),
+    _sp("tiger_swallowtail", 1, "#f0d44c", "#fae88e", "#1a1a0e",
+        fw=(1.05, 1.1), hw=(1.0, 1.05), tail=0.4, size=(14, 22)),
+    _sp("fritillary",        1, "#d4853a", "#f0c890", "#2a1c10",
+        fw=(0.95, 0.95), hw=(0.92, 0.95), size=(11, 17)),
+    _sp("peacock",           1, "#a83020", "#4060c0", "#1a1210",
+        hw=(0.95, 0.95), size=(12, 19), eyespots=True),
+    # Rare (rarity 2) — after 90 s
+    _sp("morpho",            2, "#269ac9", "#9cd9e5", "#172c35",
+        fw=(1.1, 1.0), hw=(1.05, 1.0), size=(15, 22), spec=0.35),
+    _sp("malachite",         2, "#3a8a50", "#a0d4a8", "#1a2e1c",
+        fw=(1.05, 1.0), size=(13, 20)),
+    _sp("glasswing",         2, "#c8d0d4", "#e8eef0", "#3a3530",
+        fw=(0.90, 0.95), hw=(0.85, 0.90), size=(10, 15),
+        wing_alpha=0.45, vein_scale=0.6),
+    _sp("clipper",           2, "#3a6090", "#d0d8e0", "#1a1e24",
+        fw=(1.08, 1.0), hw=(1.02, 1.0), size=(14, 21)),
+    # Ultra-rare (rarity 3) — after 3 min
+    _sp("birdwing",          3, "#2a9a4a", "#e8d430", "#0e1a10",
+        fw=(1.15, 1.1), hw=(1.10, 1.08), size=(18, 24)),
+    _sp("sunset_moth",       3, "#d04830", "#40b868", "#1a1210",
+        hw=(1.0, 1.15), tail=0.5, size=(13, 19)),
+    _sp("eighty_eight",      3, "#1a1a1e", "#d82020", "#0a0a0c",
+        fw=(0.88, 0.90), hw=(0.85, 0.88), size=(10, 15)),
+    _sp("luna",              3, "#b9cd8b", "#e9e5b0", "#535640",
+        fw=(1.05, 1.0), hw=(1.10, 1.20), tail=0.6, size=(16, 23),
+        eyespots=True, vein_scale=0.55),
+]
+
+
+def pick_species(elapsed):
+    available = [sp for sp in SPECIES if elapsed >= RARITY_UNLOCK[sp["rarity"]]]
+    weights = [RARITY_WEIGHT[sp["rarity"]] for sp in available]
+    return random.choices(available, weights=weights, k=1)[0]
+
+
+# ── Wing outline paths (parameterised per species) ─────
+
+def make_forewing(s, sx=1.0, sy=1.0):
     path = QPainterPath()
-    path.moveTo(0.08 * s, -0.26 * s)
+    path.moveTo(0.08 * s * sx, -0.26 * s * sy)
     path.cubicTo(
-        0.50 * s, -1.15 * s,
-        1.90 * s, -2.22 * s,
-        2.95 * s, -2.32 * s,
+        0.50 * s * sx, -1.15 * s * sy,
+        1.90 * s * sx, -2.22 * s * sy,
+        2.95 * s * sx, -2.32 * s * sy,
     )
     path.cubicTo(
-        3.35 * s, -2.36 * s,
-        2.94 * s, -1.04 * s,
-        2.56 * s, -0.44 * s,
+        3.35 * s * sx, -2.36 * s * sy,
+        2.94 * s * sx, -1.04 * s * sy,
+        2.56 * s * sx, -0.44 * s * sy,
     )
     path.cubicTo(
-        2.22 * s, 0.13 * s,
-        1.04 * s, 0.51 * s,
-        0.10 * s, 0.22 * s,
+        2.22 * s * sx, 0.13 * s * sy,
+        1.04 * s * sx, 0.51 * s * sy,
+        0.10 * s * sx, 0.22 * s * sy,
     )
-    path.quadTo(0.04 * s, 0.0, 0.08 * s, -0.26 * s)
+    path.quadTo(0.04 * s * sx, 0.0, 0.08 * s * sx, -0.26 * s * sy)
     path.closeSubpath()
     return path
 
 
-def make_hindwing(s):
+def make_hindwing(s, sx=1.0, sy=1.0, tail=0.0):
     path = QPainterPath()
-    path.moveTo(0.10 * s, -0.03 * s)
+    path.moveTo(0.10 * s * sx, -0.03 * s * sy)
     path.cubicTo(
-        0.80 * s, 0.0,
-        1.75 * s, -0.06 * s,
-        2.37 * s, 0.32 * s,
+        0.80 * s * sx, 0.0,
+        1.75 * s * sx, -0.06 * s * sy,
+        2.37 * s * sx, 0.32 * s * sy,
     )
     path.cubicTo(
-        2.55 * s, 0.65 * s,
-        2.16 * s, 1.06 * s,
-        2.13 * s, 1.18 * s,
+        2.55 * s * sx, 0.65 * s * sy,
+        2.16 * s * sx, 1.06 * s * sy,
+        2.13 * s * sx, 1.18 * s * sy,
     )
     path.cubicTo(
-        2.05 * s, 1.48 * s,
-        1.79 * s, 1.43 * s,
-        1.69 * s, 1.65 * s,
+        2.05 * s * sx, 1.48 * s * sy,
+        1.79 * s * sx, 1.43 * s * sy,
+        1.69 * s * sx, 1.65 * s * sy,
     )
+    if tail > 0:
+        path.cubicTo(
+            1.62 * s * sx, (1.75 + tail * 0.3) * s * sy,
+            1.55 * s * sx, (1.85 + tail * 0.8) * s * sy,
+            1.50 * s * sx, (1.88 + tail) * s * sy,
+        )
+        path.cubicTo(
+            1.45 * s * sx, (1.85 + tail * 0.8) * s * sy,
+            1.38 * s * sx, (1.75 + tail * 0.3) * s * sy,
+            1.20 * s * sx, 1.88 * s * sy,
+        )
+    else:
+        path.cubicTo(
+            1.54 * s * sx, 1.88 * s * sy,
+            1.34 * s * sx, 1.72 * s * sy,
+            1.20 * s * sx, 1.88 * s * sy,
+        )
     path.cubicTo(
-        1.54 * s, 1.88 * s,
-        1.34 * s, 1.72 * s,
-        1.20 * s, 1.88 * s,
+        0.66 * s * sx, 2.04 * s * sy,
+        0.23 * s * sx, 1.17 * s * sy,
+        0.10 * s * sx, 0.32 * s * sy,
     )
-    path.cubicTo(
-        0.66 * s, 2.04 * s,
-        0.23 * s, 1.17 * s,
-        0.10 * s, 0.32 * s,
-    )
-    path.lineTo(0.10 * s, -0.03 * s)
+    path.lineTo(0.10 * s * sx, -0.03 * s * sy)
     path.closeSubpath()
     return path
 
@@ -133,23 +188,23 @@ def sample_outline(path, n=160):
 
 # ── Wing texture rendering ─────────────────────────────
 
-def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
-    preset = PRESETS[preset_name]
-    primary = preset["primary"]
-    secondary = preset["secondary"]
-    edge = preset["edge"]
+def _render_single_wing(painter, wing_path, s, species, is_hind):
+    primary = species["primary"]
+    secondary = species["secondary"]
+    edge = species["edge"]
+    sx = species["hw_sx" if is_hind else "fw_sx"]
+    sy = species["hw_sy" if is_hind else "fw_sy"]
+    vsc = species.get("vein_scale", 1.0)
 
-    # 1 ── Base fill
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(primary))
     painter.drawPath(wing_path)
 
-    # 2 ── Textured flecks (clipped to wing shape)
     painter.save()
     painter.setClipPath(wing_path)
 
     bounds = wing_path.boundingRect()
-    rng = random.Random(hash((preset_name, is_hind, int(s * 100))))
+    rng = random.Random(hash((species["name"], is_hind, int(s * 100))))
     area = bounds.width() * bounds.height()
     fleck_count = min(900, max(150, int(area * 0.5)))
 
@@ -162,9 +217,8 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
         fh = 1.2 + rng.random() * 1.8
         painter.fillRect(QRectF(x, y, fw, fh), c)
 
-    # 3 ── Color cells between veins
     outline = sample_outline(wing_path, 160)
-    root = QPointF(0.12 * s, 0.10 * s if is_hind else -0.18 * s)
+    root = QPointF(0.12 * s * sx, (0.10 if is_hind else -0.18) * s * sy)
 
     cell_color = QColor(secondary)
     cell_color.setAlpha(65)
@@ -195,7 +249,6 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
 
     painter.restore()
 
-    # 4 ── Dark wing-edge border
     edge_w = max(1.0, s * 0.08)
     painter.setPen(
         QPen(edge, edge_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
@@ -203,9 +256,8 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
     painter.setBrush(Qt.NoBrush)
     painter.drawPath(wing_path)
 
-    # 5 ── Veins
     inner_mids = []
-    vw = max(0.5, s * (0.018 if preset_name == "luna" else 0.032))
+    vw = max(0.5, s * 0.032 * vsc)
     vein_pen = QPen(edge, vw, Qt.SolidLine, Qt.RoundCap)
 
     for i in range(8, 151, 13):
@@ -238,11 +290,8 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
         )
         painter.drawPath(bp)
 
-    # Inner vein ring
     if len(inner_mids) > 1:
-        ring_w = max(
-            0.4, s * (0.012 if preset_name == "luna" else 0.022)
-        )
+        ring_w = max(0.4, s * 0.022 * vsc)
         painter.setPen(
             QPen(edge, ring_w, Qt.SolidLine, Qt.RoundCap)
         )
@@ -252,13 +301,12 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
             ring.lineTo(mp)
         painter.drawPath(ring)
 
-    # 6 ── Margin dots
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(QColor("#f5edce")))
 
     wing_center = QPointF(
-        (1.0 if is_hind else 1.3) * s,
-        (0.7 if is_hind else -0.65) * s,
+        (1.0 if is_hind else 1.3) * s * sx,
+        (0.7 if is_hind else -0.65) * s * sy,
     )
 
     for i in range(13, 145, 5):
@@ -273,10 +321,9 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
         painter.drawEllipse(QPointF(0, 0), s * 0.015, s * 0.022)
         painter.restore()
 
-    # 7 ── Luna eyespots
-    if preset_name == "luna":
-        ex = (1.25 if is_hind else 1.9) * s
-        ey = (0.85 if is_hind else -1.1) * s
+    if species.get("eyespots", False):
+        ex = (1.25 if is_hind else 1.9) * s * sx
+        ey = (0.85 if is_hind else -1.1) * s * sy
         spots = [
             (s * 0.092, edge),
             (s * 0.072, secondary),
@@ -292,10 +339,7 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
             painter.drawEllipse(QPointF(0, 0), radius, radius * 0.8)
             painter.restore()
 
-    # 8 ── Fine outer outline for crispness
-    fine_edge = QColor(
-        edge.red(), edge.green(), edge.blue(), 180
-    )
+    fine_edge = QColor(edge.red(), edge.green(), edge.blue(), 180)
     painter.setPen(
         QPen(
             fine_edge,
@@ -310,10 +354,6 @@ def _render_single_wing(painter, wing_path, s, preset_name, is_hind):
 
 
 # ── 3D model (port of the Three.js scene) ──────────────
-#
-# Everything below works in CodePen units (x right, y toward the head,
-# z out of the butterfly's back).  Each surface is sampled densely enough
-# that every sample lands on its own sub-pixel, then splatted per frame.
 
 SUPERSAMPLE = 1.15
 TEXTURE_DPR = 1.45
@@ -328,8 +368,6 @@ def _unit(v):
     return v / np.linalg.norm(v)
 
 
-# Screen frame is X right, Y down, Z away from the viewer; CodePen
-# (x, y, z) maps to (x, -y, -z).  Light positions are the CodePen ones.
 _KEY = _unit([-3, -5, -7])
 _FILL = _unit([4, 1, 5])
 _HALF = _unit(_KEY + np.array([0.0, 0.0, -1.0]))
@@ -337,7 +375,6 @@ LIGHT_DIRS = np.stack(
     [[0.0, -1.0, 0.0], _KEY, _FILL, _HALF, [0.0, 0.0, 1.0]], axis=1
 )
 
-# HemisphereLight(0xfff6e7, 0x7e8990, 2.4), key 3.1, fill 1.7, all / pi.
 HEMI_A = 0.435
 HEMI_B = 0.249
 KEY_K = 0.99
@@ -359,15 +396,13 @@ def _lin_to_srgb(c):
 
 
 def _build_shade_lut():
-    # (5-bit-per-channel albedo, light level) -> packed opaque ARGB32 pixel,
-    # ACES-filmic toned with exposure 1.2 like the CodePen renderer.
     levels = np.arange(32, dtype=np.uint32)
     byte = ((levels << 3) | (levels >> 2)).astype(np.float32)
     lin = _srgb_to_lin(byte).astype(np.float32)
     light = (np.arange(L_LEVELS, dtype=np.float32) / L_SCALE) * 0.72
     x = lin[:, None] * light[None, :]
     toned = x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14)
-    ch = np.round(_lin_to_srgb(toned)).astype(np.uint32)  # 32 x L_LEVELS
+    ch = np.round(_lin_to_srgb(toned)).astype(np.uint32)
     b = ch[:, None, None, :]
     g = ch[None, :, None, :]
     r = ch[None, None, :, :]
@@ -396,9 +431,12 @@ def _qimage_to_array(img):
     return arr[:, : img.width()].copy()
 
 
-def _wing_points(scale, preset_name, hind):
+def _wing_points(scale, species, hind):
     s = scale
-    path = make_hindwing(s) if hind else make_forewing(s)
+    sx = species["hw_sx" if hind else "fw_sx"]
+    sy = species["hw_sy" if hind else "fw_sy"]
+    tail = species["tail"] if hind else 0.0
+    path = make_hindwing(s, sx, sy, tail) if hind else make_forewing(s, sx, sy)
     pad = s * 0.12
     b = path.boundingRect().adjusted(-pad, -pad, pad, pad)
 
@@ -413,7 +451,7 @@ def _wing_points(scale, preset_name, hind):
     p.setRenderHint(QPainter.Antialiasing)
     p.scale(dpr, dpr)
     p.translate(-b.left(), -b.top())
-    _render_single_wing(p, path, s, preset_name, hind)
+    _render_single_wing(p, path, s, species, hind)
     p.end()
 
     arr = _qimage_to_array(img)
@@ -421,7 +459,6 @@ def _wing_points(scale, preset_name, hind):
     x = ((us + 0.5) / dpr + b.left()) / s
     y = -((vs + 0.5) / dpr + b.top()) / s
 
-    # Membrane curvature straight from the CodePen geometry.
     k = np.pi / 3.2
     z = (0.13 * np.sin(x * k) + 0.06 * np.sin(2 * y) * x / 3.2
          + (-0.055 if hind else 0.035))
@@ -430,10 +467,8 @@ def _wing_points(scale, preset_name, hind):
     nrm = np.stack([-dzdx, -dzdy, np.ones_like(x)], axis=1)
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
 
-    spec = 0.35 if preset_name == "morpho" else 0.10
-    return PointSet(
-        np.stack([x, y, z], axis=1), nrm, arr[vs, us, :3], spec
-    )
+    sp = species.get("spec", 0.10)
+    return PointSet(np.stack([x, y, z], axis=1), nrm, arr[vs, us, :3], sp)
 
 
 BODY_BGR = np.array([31, 41, 48])
@@ -493,12 +528,11 @@ ANTENNA = np.array([
 
 class ButterflyModel:
 
-    def __init__(self, scale, preset_name):
+    def __init__(self, scale, species):
         density = scale * SUPERSAMPLE / BODY_SPACING
-        fore = _wing_points(scale, preset_name, hind=False)
-        hind = _wing_points(scale, preset_name, hind=True)
+        fore = _wing_points(scale, species, hind=False)
+        hind = _wing_points(scale, species, hind=True)
         self.centroid = fore.pos.mean(axis=0)
-        # Sets are splatted in order, so later parts land on top.
         self.wings = _merge([hind, fore])
         self.body = _merge([
             _ellipsoid((0, -0.57, 0.01), (0.105, 0.5, 0.115),
@@ -563,18 +597,19 @@ def _wrap_angle(a):
 class Butterfly:
     """Cruise straight -> slow down -> hover and turn -> accelerate away."""
 
-    def __init__(self, x, y, vx, vy, sw, sh):
+    def __init__(self, x, y, vx, vy, sw, sh, species):
         self.x = x
         self.y = y
         self.vx = vx
         self.vy = vy
         self.sw = sw
         self.sh = sh
+        self.species = species
 
-        self.scale = random.uniform(MIN_SCALE, MAX_SCALE)
-        self.preset_name = random.choice(PRESET_NAMES)
+        min_sz, max_sz = species["size"]
+        self.scale = random.uniform(min_sz, max_sz)
 
-        scale_norm = (self.scale - MIN_SCALE) / max(1, MAX_SCALE - MIN_SCALE)
+        scale_norm = (self.scale - min_sz) / max(1, max_sz - min_sz)
         self.energy = (1.3 - scale_norm * 0.6) * random.uniform(0.85, 1.15)
         self.base_flap_speed = random.uniform(0.12, 0.22) * self.energy
         self.cruise_speed = random.uniform(*CRUISE_SPEED) * math.sqrt(self.energy)
@@ -593,7 +628,7 @@ class Butterfly:
         self._start_cruise()
 
         self.born = time.monotonic()
-        self.model = ButterflyModel(self.scale, self.preset_name)
+        self.model = ButterflyModel(self.scale, species)
         self.wing_theta = 0.3
 
         self.bbox = (0, 0, 0, 0)
@@ -602,6 +637,9 @@ class Butterfly:
         self.nervous = 0.0
         self.held_offset_x = 0.0
         self.held_offset_y = 0.0
+
+        self.retiring = False
+        self.retire_alpha = 1.0
 
     def _start_cruise(self):
         self.state = "cruise"
@@ -624,6 +662,18 @@ class Butterfly:
         else:
             turn = random.uniform(*TURN_RANGE) * random.choice((-1, 1))
             self.target_heading = self.heading + turn
+
+    def start_retire(self):
+        if self.interaction == "held":
+            return
+        self.retiring = True
+        self.interaction = None
+        ex = 0 if self.x < self.sw / 2 else self.sw
+        ey = 0 if self.y < self.sh / 2 else self.sh
+        self.heading = math.atan2(ey - self.y, ex - self.x)
+        self.target_heading = self.heading
+        self.speed = self.cruise_speed * 1.5
+        self.state = "go"
 
     def startle(self, from_x, from_y):
         self.interaction = "startled"
@@ -662,6 +712,23 @@ class Butterfly:
         self.vy = math.sin(self.heading) * self.speed
 
     def update(self, mx, my):
+        # ── Retiring: fly toward edge and fade ───────────
+        if self.retiring:
+            self.retire_alpha -= 0.008
+            self.phase += self.base_flap_speed
+            self.wing_theta += (0.3 + 0.85 * math.sin(self.phase) - self.wing_theta) * 0.5
+            tx = math.cos(self.heading) * self.speed
+            ty = math.sin(self.heading) * self.speed
+            self.vx += (tx - self.vx) * 0.15
+            self.vy += (ty - self.vy) * 0.15
+            self.x += self.vx
+            self.y += self.vy
+            amp = self.scale * 0.09
+            self.bob += (-amp * math.sin(self.phase) - self.bob) * 0.3
+            diff = (math.degrees(self.heading) - self.angle + 180) % 360 - 180
+            self.angle += diff * 0.15
+            return
+
         # ── Held: skip all physics, just fold wings ──────
         if self.interaction == "held":
             self.wing_theta += (0.10 - self.wing_theta) * 0.12
@@ -718,6 +785,9 @@ class Butterfly:
             if self.speed > self.cruise_speed * 0.9:
                 self._start_cruise()
 
+        if self.interaction == "startled":
+            target_speed = self.cruise_speed * 2.8
+
         # ── Speed eases in and out ───────────────────────
         ease = 0.06 if target_speed < self.speed else 0.03
         self.speed += (target_speed - self.speed) * ease
@@ -740,7 +810,6 @@ class Butterfly:
             target = 0.22
         self.wing_theta += (target - self.wing_theta) * 0.5
 
-        # Body rises on each downstroke; a hovering flutter bobs more.
         if self.flapping:
             amp = self.scale * (0.18 if self.state == "hover" else 0.09)
             bob_target = -amp * math.sin(self.phase)
@@ -823,7 +892,6 @@ def _project(pos, m, px_per_unit):
 
 def _shade(ps, m):
     d = ps.nrm @ (m.T @ LIGHT_DIRS).astype(np.float32)
-    # Double-sided material: flip normals that face away from the viewer.
     d[d[:, 4] > 0] *= -1.0
     light = HEMI_A + HEMI_B * d[:, 0]
     np.maximum(d, 0, out=d)
@@ -853,8 +921,8 @@ def _fill_holes(buf):
 
 def draw_butterfly(painter, b):
     age = time.monotonic() - b.born
-    alpha = min(1.0, age / 1.5)
-    if alpha < 0.01:
+    base_alpha = min(1.0, age / 1.5) * b.retire_alpha
+    if base_alpha < 0.01:
         return
 
     m = b.model
@@ -909,7 +977,8 @@ def draw_butterfly(painter, b):
     h_disp = h_px / ss
     b.bbox = (left, top, left + w_disp, top + h_disp)
 
-    painter.setOpacity(alpha)
+    wing_alpha = b.species.get("wing_alpha", 1.0)
+    painter.setOpacity(base_alpha * wing_alpha)
     off = b.scale * 1.4
     painter.drawImage(
         QRectF(left + off * 0.6 - w_disp * 0.03, top + off - h_disp * 0.03,
@@ -918,7 +987,7 @@ def draw_butterfly(painter, b):
     )
     painter.drawImage(QRectF(left, top, w_disp, h_disp), img)
 
-    # Antennae: thin tubes read better as anti-aliased strokes.
+    painter.setOpacity(base_alpha)
     s = b.scale
     painter.setPen(QPen(QColor(48, 41, 31), max(0.8, s * 0.04),
                         Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -968,9 +1037,9 @@ class ButterflyOverlay(QWidget):
         self.mouse_y = -10000
 
         self.butterflies = []
-        self.spawned = 0
         self._dragging = None
         self._drag_prev = (0.0, 0.0)
+        self._initial_fill_done = False
 
         self.start_time = time.monotonic()
         self.physics_steps = 0
@@ -990,14 +1059,26 @@ class ButterflyOverlay(QWidget):
             QTimer.singleShot(300, self._enable_click_through)
 
     def _spawn(self):
-        if self.spawned >= BUTTERFLY_COUNT:
-            self.spawn_timer.stop()
-            return
+        elapsed = time.monotonic() - self.start_time
+        active = [b for b in self.butterflies if not b.retiring]
+
+        if len(active) >= MAX_ON_SCREEN:
+            if not self._initial_fill_done:
+                self._initial_fill_done = True
+                self.spawn_timer.setInterval(ROTATION_SPAWN_MS)
+                return
+            oldest = min(active, key=lambda b: b.born)
+            oldest.start_retire()
+
+        species = pick_species(elapsed)
         x, y, vx, vy = spawn_position(self.sw, self.sh)
         self.butterflies.append(
-            Butterfly(x, y, vx, vy, self.sw, self.sh)
+            Butterfly(x, y, vx, vy, self.sw, self.sh, species)
         )
-        self.spawned += 1
+
+        if not self._initial_fill_done and len(active) + 1 >= MAX_ON_SCREEN:
+            self._initial_fill_done = True
+            self.spawn_timer.setInterval(ROTATION_SPAWN_MS)
 
     def _enable_click_through(self):
         system = platform.system()
@@ -1031,7 +1112,6 @@ class ButterflyOverlay(QWidget):
                     [],
                 )
 
-                # Global hotkey: Ctrl+Shift+B
                 root = self.xdisplay.screen().root
                 self._hotkey_code = self.xdisplay.keysym_to_keycode(
                     XK.string_to_keysym("b")
@@ -1160,16 +1240,16 @@ class ButterflyOverlay(QWidget):
                 b.startle(x, y)
 
     def _tick(self):
-        elapsed = time.monotonic() - self.start_time
-        if elapsed >= DURATION_SECONDS:
-            self._quit()
-            return
-
         cursor = QCursor.pos()
         self.mouse_x = cursor.x()
         self.mouse_y = cursor.y()
 
-        # Physics is tuned per 1/60 s step; catch up when rendering is slower.
+        self.butterflies = [
+            b for b in self.butterflies
+            if (not b.retiring or b.retire_alpha > 0.01) or b is self._dragging
+        ]
+
+        elapsed = time.monotonic() - self.start_time
         steps = min(4, int(elapsed * FPS) - self.physics_steps)
         self.physics_steps += steps
         for _ in range(steps):
@@ -1199,5 +1279,6 @@ class ButterflyOverlay(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     print("Papillon — press Ctrl+Shift+B to close")
+    print("Rare species appear over time. Keep watching!")
     overlay = ButterflyOverlay()
     sys.exit(app.exec_())
