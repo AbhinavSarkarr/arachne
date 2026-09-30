@@ -739,85 +739,85 @@ ANTENNA_FEATHER = np.array([
 
 SPECIES = [
     # Common (rarity 0)
-    {"name": "cabbage_white", "rarity": 0, "size": (10, 16),
+    {"name": "cabbage_white", "rarity": 0, "size": (14, 20),
      "fw": _fw_round, "hw": _hw_round,
      "paint": _paint_cabbage_white, "antenna": ANTENNA_CLUB,
      "spec": 0.08, "wing_alpha": 1.0, "body_scale": 0.85},
 
-    {"name": "painted_lady", "rarity": 0, "size": (11, 17),
+    {"name": "painted_lady", "rarity": 0, "size": (15, 21),
      "fw": _fw_nymphalid, "hw": _hw_nymphalid,
      "paint": _paint_painted_lady, "antenna": ANTENNA_CLUB,
      "spec": 0.10, "wing_alpha": 1.0, "body_scale": 1.0},
 
-    {"name": "monarch", "rarity": 0, "size": (14, 21),
+    {"name": "monarch", "rarity": 0, "size": (18, 25),
      "fw": _fw_nymphalid, "hw": _hw_nymphalid,
      "paint": _paint_monarch, "antenna": ANTENNA_CLUB,
      "spec": 0.10, "wing_alpha": 1.0, "body_scale": 1.0},
 
-    {"name": "common_blue", "rarity": 0, "size": (8, 13),
+    {"name": "common_blue", "rarity": 0, "size": (12, 17),
      "fw": _fw_round, "hw": _hw_round,
      "paint": _paint_common_blue, "antenna": ANTENNA_CLUB,
      "spec": 0.12, "wing_alpha": 1.0, "body_scale": 0.75},
 
     # Uncommon (rarity 1)
-    {"name": "red_admiral", "rarity": 1, "size": (12, 18),
+    {"name": "red_admiral", "rarity": 1, "size": (16, 22),
      "fw": _fw_nymphalid, "hw": _hw_nymphalid,
      "paint": _paint_red_admiral, "antenna": ANTENNA_CLUB,
      "spec": 0.10, "wing_alpha": 1.0, "body_scale": 1.0},
 
-    {"name": "tiger_swallowtail", "rarity": 1, "size": (16, 23),
+    {"name": "tiger_swallowtail", "rarity": 1, "size": (20, 27),
      "fw": _fw_swallowtail, "hw": lambda s: _hw_swallowtail(s, tail=0.5),
      "paint": _paint_tiger_swallowtail, "antenna": ANTENNA_CLUB,
      "spec": 0.10, "wing_alpha": 1.0, "body_scale": 1.1},
 
-    {"name": "fritillary", "rarity": 1, "size": (11, 17),
+    {"name": "fritillary", "rarity": 1, "size": (15, 21),
      "fw": _fw_nymphalid, "hw": _hw_nymphalid,
      "paint": _paint_fritillary, "antenna": ANTENNA_CLUB,
      "spec": 0.10, "wing_alpha": 1.0, "body_scale": 0.95},
 
-    {"name": "peacock", "rarity": 1, "size": (13, 19),
+    {"name": "peacock", "rarity": 1, "size": (17, 23),
      "fw": _fw_angular, "hw": _hw_angular,
      "paint": _paint_peacock, "antenna": ANTENNA_CLUB,
      "spec": 0.12, "wing_alpha": 1.0, "body_scale": 1.0},
 
     # Rare (rarity 2)
-    {"name": "morpho", "rarity": 2, "size": (17, 23),
+    {"name": "morpho", "rarity": 2, "size": (21, 27),
      "fw": _fw_broad, "hw": _hw_broad,
      "paint": _paint_morpho, "antenna": ANTENNA_CLUB,
      "spec": 0.40, "wing_alpha": 1.0, "body_scale": 0.9},
 
-    {"name": "malachite", "rarity": 2, "size": (14, 20),
+    {"name": "malachite", "rarity": 2, "size": (18, 24),
      "fw": _fw_angular, "hw": _hw_angular,
      "paint": _paint_malachite, "antenna": ANTENNA_CLUB,
      "spec": 0.12, "wing_alpha": 1.0, "body_scale": 1.0},
 
-    {"name": "glasswing", "rarity": 2, "size": (9, 14),
+    {"name": "glasswing", "rarity": 2, "size": (13, 18),
      "fw": _fw_narrow, "hw": _hw_narrow,
      "paint": _paint_glasswing, "antenna": ANTENNA_CLUB,
      "spec": 0.05, "wing_alpha": 0.50, "body_scale": 0.7},
 
-    {"name": "clipper", "rarity": 2, "size": (14, 21),
+    {"name": "clipper", "rarity": 2, "size": (18, 25),
      "fw": _fw_angular, "hw": _hw_angular,
      "paint": _paint_clipper, "antenna": ANTENNA_CLUB,
      "spec": 0.10, "wing_alpha": 1.0, "body_scale": 1.0},
 
     # Ultra-rare (rarity 3)
-    {"name": "birdwing", "rarity": 3, "size": (20, 26),
+    {"name": "birdwing", "rarity": 3, "size": (24, 30),
      "fw": _fw_broad, "hw": _hw_broad,
      "paint": _paint_birdwing, "antenna": ANTENNA_CLUB,
      "spec": 0.12, "wing_alpha": 1.0, "body_scale": 1.2},
 
-    {"name": "sunset_moth", "rarity": 3, "size": (14, 20),
+    {"name": "sunset_moth", "rarity": 3, "size": (18, 24),
      "fw": _fw_swallowtail, "hw": lambda s: _hw_swallowtail(s, tail=0.6),
      "paint": _paint_sunset_moth, "antenna": ANTENNA_FEATHER,
      "spec": 0.20, "wing_alpha": 1.0, "body_scale": 1.15},
 
-    {"name": "eighty_eight", "rarity": 3, "size": (9, 14),
+    {"name": "eighty_eight", "rarity": 3, "size": (13, 18),
      "fw": _fw_round, "hw": _hw_round,
      "paint": _paint_eighty_eight, "antenna": ANTENNA_CLUB,
      "spec": 0.08, "wing_alpha": 1.0, "body_scale": 0.8},
 
-    {"name": "luna", "rarity": 3, "size": (18, 24),
+    {"name": "luna", "rarity": 3, "size": (22, 28),
      "fw": _fw_moth, "hw": lambda s: _hw_moth(s, tail=0.8),
      "paint": _paint_luna, "antenna": ANTENNA_FEATHER,
      "spec": 0.08, "wing_alpha": 1.0, "body_scale": 1.2},
