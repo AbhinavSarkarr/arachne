@@ -904,7 +904,8 @@ class ButterflyOverlay(QWidget):
         self.anim_timer.timeout.connect(self._tick)
         self.anim_timer.start(int(1000 / FPS))
 
-        self.showFullScreen()
+        self.show()
+        self.raise_()
 
         if CLICK_THROUGH:
             QTimer.singleShot(300, self._enable_click_through)
@@ -933,7 +934,7 @@ class ButterflyOverlay(QWidget):
 
         elif system == "Linux":
             try:
-                from Xlib import display, X
+                from Xlib import display, X, XK
                 from Xlib.ext import shape
 
                 self.xdisplay = display.Display()
@@ -948,17 +949,58 @@ class ButterflyOverlay(QWidget):
                     0,
                     [],
                 )
+
+                # Global hotkey: Ctrl+Shift+B
+                root = self.xdisplay.screen().root
+                self._hotkey_code = self.xdisplay.keysym_to_keycode(
+                    XK.string_to_keysym("b")
+                )
+                mods = X.ControlMask | X.ShiftMask
+                for extra in (0, X.Mod2Mask, X.LockMask,
+                              X.Mod2Mask | X.LockMask):
+                    root.grab_key(
+                        self._hotkey_code, mods | extra,
+                        True, X.GrabModeAsync, X.GrabModeAsync,
+                    )
+
                 self.xdisplay.sync()
+
+                self._hotkey_timer = QTimer(self)
+                self._hotkey_timer.timeout.connect(self._check_hotkey)
+                self._hotkey_timer.start(150)
             except Exception as e:
-                print("X11 click-through error:", e)
+                print("X11 setup error:", e)
+
+    def _check_hotkey(self):
+        try:
+            from Xlib import X
+            while self.xdisplay.pending_events():
+                ev = self.xdisplay.next_event()
+                if ev.type == X.KeyPress:
+                    self._quit()
+                    return
+        except Exception:
+            pass
+
+    def _quit(self):
+        self.anim_timer.stop()
+        self.spawn_timer.stop()
+        if hasattr(self, '_hotkey_timer'):
+            self._hotkey_timer.stop()
+        try:
+            from Xlib import X
+            root = self.xdisplay.screen().root
+            root.ungrab_key(self._hotkey_code, X.AnyModifier)
+            self.xdisplay.sync()
+        except Exception:
+            pass
+        self.close()
+        QApplication.quit()
 
     def _tick(self):
         elapsed = time.monotonic() - self.start_time
         if elapsed >= DURATION_SECONDS:
-            self.anim_timer.stop()
-            self.spawn_timer.stop()
-            self.close()
-            QApplication.quit()
+            self._quit()
             return
 
         # Physics is tuned per 1/60 s step; catch up when rendering is slower.
@@ -982,15 +1024,13 @@ class ButterflyOverlay(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            self.anim_timer.stop()
-            self.spawn_timer.stop()
-            self.close()
-            QApplication.quit()
+            self._quit()
 
 
 # ── Entry point ─────────────────────────────────────────
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    print("Papillon — press Ctrl+Shift+B to close")
     overlay = ButterflyOverlay()
     sys.exit(app.exec_())
