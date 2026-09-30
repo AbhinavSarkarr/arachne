@@ -20,6 +20,7 @@ from PyQt5.QtGui import (
     QPen,
     QBrush,
     QImage,
+    QCursor,
 )
 import numpy as np
 
@@ -595,6 +596,13 @@ class Butterfly:
         self.model = ButterflyModel(self.scale, self.preset_name)
         self.wing_theta = 0.3
 
+        self.bbox = (0, 0, 0, 0)
+        self.interaction = None
+        self.interact_timer = 0
+        self.nervous = 0.0
+        self.held_offset_x = 0.0
+        self.held_offset_y = 0.0
+
     def _start_cruise(self):
         self.state = "cruise"
         self.state_timer = random.randint(*CRUISE_FRAMES)
@@ -617,7 +625,72 @@ class Butterfly:
             turn = random.uniform(*TURN_RANGE) * random.choice((-1, 1))
             self.target_heading = self.heading + turn
 
+    def startle(self, from_x, from_y):
+        self.interaction = "startled"
+        self.interact_timer = 90
+        dx, dy = self.x - from_x, self.y - from_y
+        dist = math.hypot(dx, dy)
+        if dist > 1:
+            self.heading = math.atan2(dy, dx)
+        else:
+            self.heading += math.pi
+        self.target_heading = self.heading
+        self.speed = self.cruise_speed * 2.8
+        self.state = "go"
+        self.flapping = True
+
+    def hold(self, grab_x, grab_y):
+        self.interaction = "held"
+        self.held_offset_x = self.x - grab_x
+        self.held_offset_y = self.y - grab_y
+        self.speed = 0.0
+        self.vx = self.vy = 0.0
+        self.escape_x = self.escape_y = 0.0
+
+    def release(self, throw_vx, throw_vy):
+        self.interaction = "tumble"
+        self.interact_timer = 30
+        speed = math.hypot(throw_vx, throw_vy)
+        if speed > 0.5:
+            self.heading = math.atan2(throw_vy, throw_vx)
+            self.speed = min(speed * 0.3, self.cruise_speed * 2.0)
+        else:
+            self.heading += random.uniform(-1.0, 1.0)
+            self.speed = self.cruise_speed * 0.5
+        self.target_heading = self.heading
+        self.vx = math.cos(self.heading) * self.speed
+        self.vy = math.sin(self.heading) * self.speed
+
     def update(self, mx, my):
+        # ── Held: skip all physics, just fold wings ──────
+        if self.interaction == "held":
+            self.wing_theta += (0.10 - self.wing_theta) * 0.12
+            self.phase += self.base_flap_speed * 0.25
+            self.bob *= 0.9
+            return
+
+        # ── Tumble after release ─────────────────────────
+        if self.interaction == "tumble":
+            self.interact_timer -= 1
+            self.phase += self.base_flap_speed * 2.8
+            self.wing_theta = 0.3 + 0.55 * math.sin(self.phase * 2.7)
+            self.x += self.vx
+            self.y += self.vy + 0.4
+            self.angle += random.uniform(-8, 8)
+            self.bob = self.scale * 0.1 * math.sin(self.phase)
+            if self.interact_timer <= 0:
+                self.interaction = None
+                self._pick_new_heading()
+                self.state = "go"
+            return
+
+        # ── Startled: fast flight, counts down ───────────
+        if self.interaction == "startled":
+            self.interact_timer -= 1
+            if self.interact_timer <= 0:
+                self.interaction = None
+                self._start_cruise()
+
         self.state_timer -= 1
 
         # ── Behaviour state ──────────────────────────────
@@ -660,6 +733,7 @@ class Butterfly:
         # ── Wings ────────────────────────────────────────
         if self.flapping:
             flap_mult = 1.15 if self.state == "hover" else 1.0
+            flap_mult += self.nervous * 0.5
             self.phase += self.base_flap_speed * flap_mult
             target = 0.3 + 0.85 * math.sin(self.phase)
         else:
@@ -679,17 +753,22 @@ class Butterfly:
         self.drift_x = self.drift_x * 0.95 + random.gauss(0, drift)
         self.drift_y = self.drift_y * 0.95 + random.gauss(0, drift)
 
-        # ── Mouse: dart away ─────────────────────────────
+        # ── Mouse: dart away + nervous hover ─────────────
         dx = self.x - mx
         dy = self.y - my
         dist = math.hypot(dx, dy)
-        if 1 < dist < MOUSE_REPEL_RADIUS:
-            push = (1 - dist / MOUSE_REPEL_RADIUS) * MOUSE_REPEL_STRENGTH
-            self.escape_x += dx / dist * push * 0.25
-            self.escape_y += dy / dist * push * 0.25
-            self.target_heading = math.atan2(dy, dx)
-            if self.state == "hover":
-                self.state = "go"
+        if self.interaction != "startled":
+            if 1 < dist < MOUSE_REPEL_RADIUS:
+                push = (1 - dist / MOUSE_REPEL_RADIUS) * MOUSE_REPEL_STRENGTH
+                self.escape_x += dx / dist * push * 0.25
+                self.escape_y += dy / dist * push * 0.25
+                self.target_heading = math.atan2(dy, dx)
+                if self.state == "hover":
+                    self.state = "go"
+        if dist < MOUSE_REPEL_RADIUS * 1.5:
+            self.nervous = min(1.0, self.nervous + 0.06)
+        else:
+            self.nervous = max(0.0, self.nervous - 0.02)
         self.escape_x *= 0.93
         self.escape_y *= 0.93
 
@@ -828,6 +907,7 @@ def draw_butterfly(painter, b):
     top = by + y0 / ss
     w_disp = w_px / ss
     h_disp = h_px / ss
+    b.bbox = (left, top, left + w_disp, top + h_disp)
 
     painter.setOpacity(alpha)
     off = b.scale * 1.4
@@ -884,14 +964,13 @@ class ButterflyOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
 
-        if CLICK_THROUGH:
-            self.setAttribute(Qt.WA_TransparentForMouseEvents)
-
         self.mouse_x = -10000
         self.mouse_y = -10000
 
         self.butterflies = []
         self.spawned = 0
+        self._dragging = None
+        self._drag_prev = (0.0, 0.0)
 
         self.start_time = time.monotonic()
         self.physics_steps = 0
@@ -938,10 +1017,12 @@ class ButterflyOverlay(QWidget):
                 from Xlib.ext import shape
 
                 self.xdisplay = display.Display()
-                window = self.xdisplay.create_resource_object(
+                self._x11_window = self.xdisplay.create_resource_object(
                     "window", int(self.winId())
                 )
-                window.shape_rectangles(
+                self._x11_shape = shape
+                self._x11_X = X
+                self._x11_window.shape_rectangles(
                     shape.SO.Set,
                     shape.SK.Input,
                     X.Unsorted,
@@ -997,11 +1078,96 @@ class ButterflyOverlay(QWidget):
         self.close()
         QApplication.quit()
 
+    def _update_input_region(self):
+        if not hasattr(self, '_x11_window'):
+            return
+        if self._dragging:
+            return
+        pad = 10
+        rects = []
+        for b in self.butterflies:
+            x1, y1, x2, y2 = b.bbox
+            rects.append((
+                max(0, int(x1) - pad), max(0, int(y1) - pad),
+                int(x2 - x1) + 2 * pad, int(y2 - y1) + 2 * pad,
+            ))
+        try:
+            self._x11_window.shape_rectangles(
+                self._x11_shape.SO.Set,
+                self._x11_shape.SK.Input,
+                self._x11_X.Unsorted,
+                0, 0, rects,
+            )
+            self.xdisplay.flush()
+        except Exception:
+            pass
+
+    def _hit_butterfly(self, x, y):
+        for b in reversed(self.butterflies):
+            bx1, by1, bx2, by2 = b.bbox
+            if bx1 <= x <= bx2 and by1 <= y <= by2:
+                return b
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            x, y = event.x(), event.y()
+            b = self._hit_butterfly(x, y)
+            if b:
+                if b.interaction == "held":
+                    return
+                b.hold(x, y)
+                self._dragging = b
+                self._drag_prev = (x, y)
+                self.grabMouse()
+                if hasattr(self, '_x11_window'):
+                    try:
+                        self._x11_window.shape_rectangles(
+                            self._x11_shape.SO.Set,
+                            self._x11_shape.SK.Input,
+                            self._x11_X.Unsorted,
+                            0, 0,
+                            [(0, 0, self.sw, self.sh)],
+                        )
+                        self.xdisplay.flush()
+                    except Exception:
+                        pass
+
+    def mouseMoveEvent(self, event):
+        x, y = event.x(), event.y()
+        if self._dragging:
+            b = self._dragging
+            b.x = x + b.held_offset_x
+            b.y = y + b.held_offset_y
+            self._drag_prev = (x, y)
+            return
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            b = self._dragging
+            x, y = event.x(), event.y()
+            px, py = self._drag_prev
+            throw_vx = (x - px)
+            throw_vy = (y - py)
+            b.release(throw_vx, throw_vy)
+            self._dragging = None
+            self.releaseMouse()
+            return
+        if event.button() == Qt.LeftButton:
+            x, y = event.x(), event.y()
+            b = self._hit_butterfly(x, y)
+            if b and b.interaction != "held":
+                b.startle(x, y)
+
     def _tick(self):
         elapsed = time.monotonic() - self.start_time
         if elapsed >= DURATION_SECONDS:
             self._quit()
             return
+
+        cursor = QCursor.pos()
+        self.mouse_x = cursor.x()
+        self.mouse_y = cursor.y()
 
         # Physics is tuned per 1/60 s step; catch up when rendering is slower.
         steps = min(4, int(elapsed * FPS) - self.physics_steps)
@@ -1011,6 +1177,7 @@ class ButterflyOverlay(QWidget):
                 b.update(self.mouse_x, self.mouse_y)
 
         self.update()
+        self._update_input_region()
 
     def paintEvent(self, event):
         painter = QPainter(self)
