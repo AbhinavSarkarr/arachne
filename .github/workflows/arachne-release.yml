@@ -1,0 +1,92 @@
+name: Arachne installers
+
+# Push a tag like "arachne-v2.0.0" (or run manually) to build installers for
+# Windows (ArachneSetup.exe), macOS (Arachne-<ver>.pkg) and Linux (.deb + binary).
+on:
+  push:
+    tags: ["arachne-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    env:
+      ARACHNE_VERSION: ${{ startsWith(github.ref, 'refs/tags/arachne-v') && github.ref_name || 'arachne-v2.0.0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Version number
+        shell: bash
+        run: echo "ARACHNE_VERSION=${ARACHNE_VERSION#arachne-v}" >> "$GITHUB_ENV"
+
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-xinerama0 libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1
+
+      - name: Python dependencies
+        shell: bash
+        run: |
+          pip install pyqt5 numpy pyinstaller
+          if [ "$RUNNER_OS" = "Linux" ]; then pip install python-xlib; fi
+
+      - name: Self-test
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python test_spiders.py
+
+      - name: Icons
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python packaging/make_icon.py
+
+      - name: Build app
+        run: pyinstaller --noconfirm packaging/arachne.spec
+
+      - name: Linux package
+        if: runner.os == 'Linux'
+        run: |
+          bash packaging/linux/build_deb.sh "$ARACHNE_VERSION"
+          cp dist/arachne "dist/arachne-linux-x86_64"
+
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\arachne.iss
+
+      - name: macOS installer
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/build_pkg.sh "$ARACHNE_VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arachne-${{ runner.os }}
+          path: |
+            dist/ArachneSetup.exe
+            dist/Arachne-*.pkg
+            dist/arachne_*.deb
+            dist/arachne-linux-x86_64
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/arachne-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ArachneSetup.exe
+            dist/Arachne-*.pkg
+            dist/arachne_*.deb
+            dist/arachne-linux-x86_64

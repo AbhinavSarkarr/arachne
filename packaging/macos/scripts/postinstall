@@ -1,0 +1,8 @@
+#!/bin/bash
+# Runs as root after install: set up the Ctrl+Shift+B login agent for the logged-in user.
+user=$(stat -f%Su /dev/console)
+if [ -n "$user" ] && [ "$user" != "root" ]; then
+    uid=$(id -u "$user")
+    launchctl asuser "$uid" sudo -u "$user" /Applications/Arachne.app/Contents/MacOS/Arachne --setup || true
+fi
+exit 0

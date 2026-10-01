@@ -1,0 +1,4 @@
+#!/bin/bash
+# Start the spider colony, or save and stop it if it is running (same as Ctrl+Shift+B).
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec "$DIR/venv/bin/python" "$DIR/arachne.py" "$@"
