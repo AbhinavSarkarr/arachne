@@ -58,9 +58,7 @@ jobs:
 
       - name: Linux package
         if: runner.os == 'Linux'
-        run: |
-          bash packaging/linux/build_deb.sh "$ARACHNE_VERSION"
-          cp dist/arachne "dist/arachne-linux-x86_64"
+        run: bash packaging/linux/build_deb.sh "$ARACHNE_VERSION"
 
       - name: Windows installer
         if: runner.os == 'Windows'
@@ -72,21 +70,25 @@ jobs:
         if: runner.os == 'macOS'
         run: bash packaging/macos/build_pkg.sh "$ARACHNE_VERSION"
 
+      - name: One installer per system, friendly names
+        shell: bash
+        run: |
+          mkdir -p release
+          case "$RUNNER_OS" in
+            Windows) cp dist/ArachneSetup.exe release/Arachne-Windows-Setup.exe ;;
+            macOS)   cp dist/Arachne-*.pkg release/Arachne-macOS.pkg ;;
+            Linux)   cp dist/arachne_*.deb release/Arachne-Linux.deb ;;
+          esac
+
       - uses: actions/upload-artifact@v4
         with:
           name: arachne-${{ runner.os }}
-          path: |
-            dist/ArachneSetup.exe
-            dist/Arachne-*.pkg
-            dist/arachne_*.deb
-            dist/arachne-linux-x86_64
+          path: release/*
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/arachne-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/ArachneSetup.exe
-            dist/Arachne-*.pkg
-            dist/arachne_*.deb
-            dist/arachne-linux-x86_64
+          name: Arachne ${{ env.ARACHNE_VERSION }}
+          body_path: packaging/RELEASE_NOTES.md
+          files: release/*
