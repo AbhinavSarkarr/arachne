@@ -642,6 +642,10 @@ def _decor_bagheera(p, o, post):
         _E(p, cx + rx + 0.26, -0.04, 0.04, 0.03, "#fff0c0")
 
 
+_decor_regal.front = True
+_decor_bagheera.front = True
+
+
 # World-space decor (after the body) ─────────────────────
 
 def _world_net(p, o):
@@ -973,58 +977,88 @@ def _segs(sp):
     return out
 
 
-def build_body(sp, s):
-    """Pre-render the body (segments, pattern, palps, eyes) once per spider."""
-    cx, rx, ry = sp["ceph"]
-    ax, arx, ary = sp["abd"]
-    segs = _segs(sp)
-    x0 = min(c - r for c, _, r, _ in segs) - 0.3
-    x1 = cx + rx + 0.55
-    half = max(abs(y) + r2 for _, y, _, r2 in segs) + (0.5 if sp["spines"] else 0.2)
-    k = s * BODY_DPR
-    img = QImage(int((x1 - x0) * k) + 2, int(2 * half * k) + 2,
-                 QImage.Format_ARGB32_Premultiplied)
-    img.fill(Qt.transparent)
+ABD_FLEX = {"spiny_orb": 0.25, "bird_dropping": 0.35, "crab_spider": 0.5, "flower_crab": 0.35,
+            "bolas_spider": 0.4, "redknee_tarantula": 0.55, "goliath_birdeater": 0.55,
+            "gooty_sapphire": 0.55, "trapdoor_spider": 0.55, "ladybird_spider": 0.6,
+            "mirror_spider": 0.6}
+SPINY_LEGS = {"house_spider", "wolf_spider", "huntsman", "wandering_spider", "garden_cross",
+              "golden_orb", "wasp_spider", "golden_wheel", "spitting_spider"}
+
+
+def _layer_painter(img, k, x0, half):
     p = QPainter(img)
     p.setRenderHint(QPainter.Antialiasing)
     p.scale(k, k)
     p.translate(-x0, half)
-    rng = random.Random(sp["name"])
+    return p
 
+
+def _keep_only(img, path, k, x0, half):
+    """Cut a layer down to `path` (alpha mask)."""
+    mask = QImage(img.size(), QImage.Format_ARGB32_Premultiplied)
+    mask.fill(Qt.transparent)
+    q = _layer_painter(mask, k, x0, half)
+    q.fillPath(path, QColor(0, 0, 0, 255))
+    q.end()
+    q = QPainter(img)
+    q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+    q.drawImage(0, 0, mask)
+    q.end()
+
+
+def build_body(sp, s):
+    """Pre-render the body once, as two layers joined at the pedicel (waist):
+    the abdomen layer swings behind the cephalothorax when the spider turns."""
+    cx, rx, ry = sp["ceph"]
+    ax, arx, ary = sp["abd"]
+    segs = _segs(sp)
+    pivot = (ax + arx * 0.9 + cx - rx * 0.9) / 2
+    x0 = min(c - r for c, _, r, _ in segs) - 0.4
+    x1 = cx + rx + 0.55
+    half = max(abs(y) + r2 for _, y, _, r2 in segs) + (0.5 if sp["spines"] else 0.25)
+    k = s * BODY_DPR
+    W, H = int((x1 - x0) * k) + 2, int(2 * half * k) + 2
     cp = _ell_path(cx, rx, ry)
     ap = _ell_path(ax, arx, ary)
+    back = [e for e in sp["extra"] if e[0] < pivot]
+    front = [e for e in sp["extra"] if e[0] >= pivot]
+    dark = QColor(sp["abd_col"]).darker(170).name()
+    cdark = QColor(sp["ceph_col"]).darker(190).name()
 
-    # Pedipalps and chelicerae poke out in front
-    p.setPen(QPen(_col(sp["leg"]), max(0.06, sp["thick"] * 0.7),
-                  Qt.SolidLine, Qt.RoundCap))
-    p.setBrush(Qt.NoBrush)
-    for side in (-1, 1):
-        path = QPainterPath(QPointF(cx + rx * 0.6, side * ry * 0.35))
-        path.quadTo(QPointF(cx + rx + 0.2, side * ry * 0.55),
-                    QPointF(cx + rx + 0.38, side * ry * 0.3))
-        p.drawPath(path)
-        _E(p, cx + rx * 0.9, side * 0.09, 0.16, 0.1, sp["chel"])
+    def extra_col(e):
+        return e[4] if len(e) > 4 else sp.get("petal", sp["abd_col"])
 
+    def pattern(p):
+        if sp["pat"]:
+            sp["pat"](p, cp, ap, sp, random.Random(sp["name"]))
+
+    # ── abdomen layer ──
+    abd = QImage(W, H, QImage.Format_ARGB32_Premultiplied)
+    abd.fill(Qt.transparent)
+    p = _layer_painter(abd, k, x0, half)
     if sp["spines"]:
         _spines(p, sp)
-    if sp["spinnerets"]:
-        p.setPen(QPen(_col(sp["abd_col"]), 0.07, Qt.SolidLine, Qt.RoundCap))
-        for side in (-1, 1):
-            p.drawLine(QPointF(ax - arx + 0.05, side * 0.05),
-                       QPointF(ax - arx - 0.22, side * 0.1))
+    tip = ax - arx
+    for side in (-1, 0, 1):                       # spinnerets
+        ln = 0.26 if sp["spinnerets"] and side else 0.1
+        p.setPen(QPen(_col(dark), 0.07 if side else 0.06, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(tip + 0.08, side * 0.05), QPointF(tip - ln, side * (0.08 + ln * 0.2)))
     _E(p, ax, 0, arx, ary, sp["abd_col"], sp["abd_alpha"])
-    for e in sp["extra"]:
-        _E(p, e[0], e[1], e[2], e[3], e[4] if len(e) > 4 else sp.get("petal", sp["abd_col"]),
-           sp["abd_alpha"])
-    _E(p, (ax + arx * 0.9 + cx - rx * 0.9) / 2, 0, 0.12, 0.1, sp["ceph_col"])
-    _E(p, cx, 0, rx, ry, sp["ceph_col"])
-    if sp["pat"]:
-        sp["pat"](p, cp, ap, sp, rng)
+    for e in back:
+        _E(p, e[0], e[1], e[2], e[3], extra_col(e), sp["abd_alpha"])
+    pattern(p)
+    _clip(p, ap)                                  # muscle dimples (sigilla) + heart mark
+    for i in range(3):
+        for side in (-1, 1):
+            _E(p, ax + arx * (0.45 - i * 0.28), side * ary * 0.28, 0.035, 0.025, dark, 55)
+    p.setPen(QPen(_col(dark, 35), 0.07, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(ax + arx * 0.75, 0), QPointF(ax + arx * 0.1, 0))
+    p.restore()
+    rng = random.Random(sp["name"] + "fur")
     if sp["hairy"]:
         hi = QColor(sp["leg_hi"]).name()
-        _fur(p, ap, [hi, "#000000"], 160, rng)
-        _fur(p, cp, [hi, "#000000"], 80, rng)
-    if sp.get("variant") == "babies":      # wolf mother: young packed on her back
+        _fur(p, ap, [hi, "#000000", hi], 260, rng, 0.13, 0.028)
+    if sp.get("variant") == "babies":
         n = 0
         while n < 70:
             bx, by = rng.uniform(-1, 1), rng.uniform(-1, 1)
@@ -1034,27 +1068,68 @@ def build_body(sp, s):
                    rng.choice(["#b8a488", "#a08c70", "#c8b898"]))
                 _E(p, ax + bx * arx + r * 0.3, by * ary, r * 0.35, r * 0.3, "#3a2e22")
                 n += 1
+    p.end()
+    region = QPainterPath()
+    region.setFillRule(Qt.WindingFill)
+    if sp["spines"]:
+        region.addEllipse(QPointF(ax, 0), arx + 0.5, ary + 0.5)
+    region.addEllipse(QPointF(ax, 0), arx, ary)
+    for e in back:
+        region.addEllipse(QPointF(e[0], e[1]), e[2], e[3])
+    region.addRect(QRectF(tip - 0.32, -0.2, 0.45, 0.4))
+    _keep_only(abd, region, k, x0, half)
 
-    # Eyes
+    # ── cephalothorax layer (with chelicerae, fangs, eyes) ──
+    ceph = QImage(W, H, QImage.Format_ARGB32_Premultiplied)
+    ceph.fill(Qt.transparent)
+    p = _layer_painter(ceph, k, x0, half)
+    for side in (-1, 1):                          # chelicerae with curved fangs
+        _E(p, cx + rx * 0.9, side * 0.09, 0.17, 0.1, sp["chel"])
+        p.setPen(QPen(_col("#0a0806"), 0.04, Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        f = QPainterPath(QPointF(cx + rx * 0.9 + 0.12, side * 0.12))
+        f.quadTo(QPointF(cx + rx * 0.9 + 0.2, side * 0.06), QPointF(cx + rx * 0.9 + 0.15, side * 0.01))
+        p.drawPath(f)
+    _E(p, pivot, 0, 0.12, 0.1, sp["ceph_col"])   # pedicel
+    for e in front:
+        _E(p, e[0], e[1], e[2], e[3], extra_col(e), sp["abd_alpha"])
+    _E(p, cx, 0, rx, ry, sp["ceph_col"])
+    pattern(p)
+    _clip(p, cp)                                  # fovea + radial grooves
+    _E(p, cx - rx * 0.2, 0, 0.05, 0.035, cdark, 110)
+    p.setPen(QPen(_col(cdark, 60), 0.035, Qt.SolidLine, Qt.RoundCap))
+    for a in (40, 80, 115, 145):
+        for side in (-1, 1):
+            r_ = math.radians(a)
+            p.drawLine(QPointF(cx - rx * 0.2 + math.cos(r_) * rx * 0.18, side * math.sin(r_) * ry * 0.18),
+                       QPointF(cx - rx * 0.2 + math.cos(r_) * rx * 0.75, side * math.sin(r_) * ry * 0.75))
+    p.restore()
+    if sp["hairy"]:
+        hi = QColor(sp["leg_hi"]).name()
+        _fur(p, cp, [hi, "#000000", hi], 120, rng, 0.11, 0.026)
+
+    # eyes: dark glossy domes; the glint is drawn live so it tracks the light
+    eyes = []
     ex = cx + rx * 0.72
     style = sp["eyes"]
 
-    def eye(x, y, r, shine=160):
-        _E(p, x, y, r, r, "#050505")
-        _E(p, x + r * 0.2, y - r * 0.3, r * 0.35, r * 0.35, "#ffffff", shine)
+    def eye(x, y, r):
+        _E(p, x, y, r * 1.18, r * 1.18, cdark, 140)
+        _E(p, x, y, r, r, "#060606")
+        eyes.append((x, y, r))
 
     for side in (-1, 1):
         if style == "jumper":
-            eye(ex, side * 0.16, 0.14, 220)
+            eye(ex, side * 0.16, 0.14)
             eye(ex - 0.12, side * 0.33, 0.06)
             eye(cx - rx * 0.2, side * ry * 0.75, 0.05)
         elif style == "ogre":
-            eye(ex - 0.05, side * 0.13, 0.17, 230)
+            eye(ex - 0.05, side * 0.13, 0.17)
             eye(ex + 0.1, side * 0.24, 0.04)
         elif style == "wolf":
             eye(ex + 0.06, side * 0.05, 0.035)
             eye(ex + 0.05, side * 0.14, 0.035)
-            eye(ex - 0.1, side * 0.12, 0.085, 220)
+            eye(ex - 0.1, side * 0.12, 0.085)
             eye(ex - 0.28, side * 0.18, 0.06)
         elif style == "six":
             for dx, dy in ((0.0, 0.08), (-0.04, 0.17), (0.03, 0.26)):
@@ -1064,8 +1139,16 @@ def build_body(sp, s):
                               (-0.08, 0.1, 0.04), (-0.07, 0.2, 0.04)):
                 eye(ex + dx, side * dy, r)
     p.end()
+    region = QPainterPath()
+    region.setFillRule(Qt.WindingFill)
+    region.addEllipse(QPointF(cx, 0), rx, ry)
+    region.addEllipse(QPointF(pivot, 0), 0.13, 0.11)
+    for e in front:
+        region.addEllipse(QPointF(e[0], e[1]), e[2], e[3])
+    region.addRect(QRectF(cx + rx * 0.6, -0.25, 0.55, 0.5))
+    _keep_only(ceph, region, k, x0, half)
 
-    # Soft body shadow, blurred once by down/up-scaling
+    # soft body shadow, blurred once by down/up-scaling
     pad = 0.5
     ks = max(2.0, s)
     simg = QImage(int((x1 - x0 + 2 * pad) * ks) + 2, int((2 * half + 2 * pad) * ks) + 2,
@@ -1076,7 +1159,7 @@ def build_body(sp, s):
     q.scale(ks, ks)
     q.translate(-x0 + pad, half + pad)
     q.setPen(Qt.NoPen)
-    q.setBrush(QColor(0, 0, 0, 120))
+    q.setBrush(QColor(0, 0, 0, 125))
     shadow = QPainterPath()
     shadow.setFillRule(Qt.WindingFill)
     for c, y, r1, r2 in segs:
@@ -1087,8 +1170,222 @@ def build_body(sp, s):
     simg = simg.scaled(max(1, w // 4), max(1, h // 4), Qt.IgnoreAspectRatio,
                        Qt.SmoothTransformation).scaled(w, h, Qt.IgnoreAspectRatio,
                                                        Qt.SmoothTransformation)
-    srect = QRectF(x0 - pad, -half - pad, x1 - x0 + 2 * pad, 2 * half + 2 * pad)
-    return img, QRectF(x0, -half, x1 - x0, 2 * half), (simg, srect)
+    rect = QRectF(x0, -half, x1 - x0, 2 * half)
+    art = dict(abd=abd, ceph=ceph, rect=rect, pivot=pivot, eyes=eyes,
+               aseg=[segs[0]] + [(e[0], e[1], e[2], e[3]) for e in back],
+               cseg=[segs[1]] + [(e[0], e[1], e[2], e[3]) for e in front],
+               flex=ABD_FLEX.get(sp["name"], 1.0))
+    return art, (simg, QRectF(x0 - pad, -half - pad, x1 - x0 + 2 * pad, 2 * half + 2 * pad))
+
+
+# ── Leg geometry: hip → coxa → femur → patella(knee) → tibia → metatarsus → tarsus ──
+
+_LEG_W = (1.0, 0.96, 0.9, 0.66, 0.5, 0.2)      # width at each joint, × femur width
+
+
+def _leg_chain(j, s, w0):
+    (hx, hy, hz), (kx, ky, kz), (ax, ay, az), (fx, fy, fz) = j
+    cxp, cyp = hx + (kx - hx) * 0.14, hy + (ky - hy) * 0.14
+    mx, my = kx + (ax - kx) * 0.55, ky + (ay - ky) * 0.55
+    mz = kz + (az - kz) * 0.55
+    pts = ((hx, hy, hz), (cxp, cyp, hz), (kx, ky, kz), (mx, my, mz), (ax, ay, az), (fx, fy, fz))
+    out = []
+    n = len(pts)
+    for i, (x, y, z) in enumerate(pts):
+        px, py = pts[max(0, i - 1)][:2]
+        qx, qy = pts[min(n - 1, i + 1)][:2]
+        dx, dy = qx - px, qy - py
+        d = math.hypot(dx, dy) or 1.0
+        w = w0 * _LEG_W[i] * (1 + z / (s * 28))     # nearer the viewer = a touch thicker
+        out.append((x, y, z, -dy / d * w / 2, dx / d * w / 2, w))
+    return out
+
+
+def _area(xy):
+    return sum(xy[i][0] * xy[i - 1][1] - xy[i - 1][0] * xy[i][1] for i in range(len(xy)))
+
+
+# Every leg quad is built with the same winding (normals always on the same side), so
+# joint caps just need to match it once — then winding-fill unions never cancel into holes.
+_QUAD_SIGN = _area([(0, 1), (1, 1), (1, -1), (0, -1)]) > 0
+_CIRCLE = [(math.cos(i * math.tau / 8), math.sin(i * math.tau / 8)) for i in range(8)]
+if (_area(_CIRCLE) > 0) != _QUAD_SIGN:
+    _CIRCLE.reverse()
+
+
+def _poly(path, pts):
+    """Polygon of unknown winding (rare): orient it to match the quads."""
+    xy = [(q.x(), q.y()) for q in pts]
+    path.addPolygon(QPolygonF(pts if (_area(xy) > 0) == _QUAD_SIGN else pts[::-1]))
+
+
+def _cap(path, x, y, r):
+    path.addPolygon(QPolygonF([QPointF(x + cx * r, y + cy * r) for cx, cy in _CIRCLE]))
+
+
+def _quad(path, a, b, f0=0.0, f1=1.0):
+    ax, ay, _, anx, any_, _ = a
+    bx, by, _, bnx, bny, _ = b
+    x0, y0 = ax + (bx - ax) * f0, ay + (by - ay) * f0
+    x1, y1 = ax + (bx - ax) * f1, ay + (by - ay) * f1
+    n0x, n0y = anx + (bnx - anx) * f0, any_ + (bny - any_) * f0
+    n1x, n1y = anx + (bnx - anx) * f1, any_ + (bny - any_) * f1
+    path.addPolygon(QPolygonF([QPointF(x0 + n0x, y0 + n0y), QPointF(x1 + n1x, y1 + n1y),
+                               QPointF(x1 - n1x, y1 - n1y), QPointF(x0 - n0x, y0 - n0y)]))
+
+
+def _draw_legs(p, o, base):
+    """Each segment type (coxa, femur, tibia, metatarsus, tarsus) for all 8 legs is one
+    stroked path: tapered legs, round joints, no overlaps, ~10 draw calls per spider."""
+    sp = o.sp
+    s = o.s
+    w0 = max(0.8, s * sp["thick"])
+    chains = [_leg_chain(j, s, w0) for j in o.joints]
+    o.chains = chains
+    segw = [w0 * (_LEG_W[i] + _LEG_W[i + 1]) / 2 for i in range(5)]
+    paths = [QPainterPath() for _ in range(5)]
+    band = QPainterPath()
+    shade = QPainterPath()
+    lit = QPainterPath()
+    hairs, spines, claws = [], [], []
+    lx, ly = LIGHT
+    hairy, spiny = sp["hairy"] and w0 >= 1.3, sp["name"] in SPINY_LEGS and w0 >= 1.2
+    for ch in chains:
+        for i in range(5):
+            a, b = ch[i], ch[i + 1]
+            paths[i].moveTo(a[0], a[1])
+            paths[i].lineTo(b[0], b[1])
+        if sp["band"]:                            # pale rings at the joints
+            for i, f in ((2, 0.3), (3, 0.35), (4, 0.25)):
+                a, b = ch[i], ch[i + 1]
+                band.moveTo(a[0], a[1])
+                band.lineTo(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+        if w0 >= 1.3:                             # cylinder shading: dark underside, lit edge
+            for i in (1, 2, 3):
+                a, b = ch[i], ch[i + 1]
+                side = 1 if a[3] * lx + a[4] * ly < 0 else -1
+                shade.moveTo(a[0] - side * a[3] * 0.5, a[1] - side * a[4] * 0.5)
+                shade.lineTo(b[0] - side * b[3] * 0.5, b[1] - side * b[4] * 0.5)
+                lit.moveTo(a[0] + side * a[3] * 0.45, a[1] + side * a[4] * 0.45)
+                lit.lineTo(b[0] + side * b[3] * 0.45, b[1] + side * b[4] * 0.45)
+        claws.append(QPointF(ch[-1][0], ch[-1][1]))
+        if hairy or spiny:
+            for i in (1, 2, 3, 4):
+                a, b = ch[i], ch[i + 1]
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                ln = math.hypot(dx, dy) or 1.0
+                ux, uy = dx / ln, dy / ln
+                w = segw[i]
+                steps = max(2, int(ln / max(1.4, w * 0.8))) if hairy else 2
+                for t in range(steps):
+                    f = (t + 0.5) / steps
+                    x, y = a[0] + dx * f, a[1] + dy * f
+                    for sd in (-1, 1):
+                        nx, ny = -uy * sd, ux * sd
+                        if hairy:
+                            L = w * 0.85
+                            hairs.append(QLineF(x + nx * w * 0.4, y + ny * w * 0.4,
+                                                x + nx * (w * 0.4 + L) + ux * L * 0.8,
+                                                y + ny * (w * 0.4 + L) + uy * L * 0.8))
+                        elif i in (2, 3) and t == 1:  # stiff spines on tibia & metatarsus
+                            L = w * 1.4
+                            spines.append(QLineF(x + nx * w * 0.45, y + ny * w * 0.45,
+                                                 x + nx * L + ux * L * 0.9, y + ny * L + uy * L * 0.9))
+    p.setBrush(Qt.NoBrush)
+    for i in (0, 1, 2, 3, 4):
+        p.setPen(QPen(base, max(0.45, segw[i]), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(paths[i])
+    if sp["band"]:
+        p.setPen(QPen(QColor(sp["band"]), max(0.45, segw[2] * 1.02), Qt.SolidLine, Qt.FlatCap))
+        p.drawPath(band)
+    if w0 >= 1.3:
+        p.setPen(QPen(QColor(0, 0, 0, 70), w0 * 0.32, Qt.SolidLine, Qt.RoundCap))
+        p.drawPath(shade)
+        p.setPen(QPen(_col(sp["leg_hi"], 125), max(0.4, w0 * 0.18), Qt.SolidLine, Qt.RoundCap))
+        p.drawPath(lit)
+    if sp["knee"]:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(sp["knee"]))
+        for ch in chains:
+            k = ch[2]
+            p.drawEllipse(QPointF(k[0], k[1]), k[5] * 0.6 * sp["knee_r"], k[5] * 0.6 * sp["knee_r"])
+    if hairs:
+        p.setPen(QPen(_col(sp["leg_hi"], 95), max(0.35, w0 * 0.09)))
+        p.drawLines(hairs)
+    if spines:
+        p.setPen(QPen(QColor(base).darker(180), max(0.35, w0 * 0.1), Qt.SolidLine, Qt.RoundCap))
+        p.drawLines(spines)
+    if w0 >= 1.3:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(base).darker(220))
+        for c in claws:
+            p.drawEllipse(c, w0 * 0.12, w0 * 0.12)
+
+
+def _draw_palps(p, o, base):
+    """Pedipalps: twitch while walking, tap the ground, wave when idle."""
+    sp = o.sp
+    cx, rx, ry = sp["ceph"]
+    w = max(0.05, sp["thick"] * 0.75)
+    walk = min(1.0, o.speed / max(0.3, sp["speed"]))
+    for side in (-1, 1):
+        ph = o.frame * (0.35 if walk > 0.1 else 0.06) + (0 if side < 0 else math.pi)
+        swing = math.sin(ph) * (0.22 * walk + 0.08)
+        bx, by = cx + rx * 0.62, side * ry * 0.38
+        a1 = side * (0.55 + swing)
+        kx, ky = bx + math.cos(a1) * 0.32, by + math.sin(a1) * 0.32
+        tip = 0.3 if sp["gait"] != "jumper" else 0.22
+        a2 = side * (0.15 - swing * 0.5)
+        tx, ty = kx + math.cos(a2) * tip, ky + math.sin(a2) * tip
+        p.setPen(QPen(base, w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        p.drawPolyline(QPolygonF([QPointF(bx, by), QPointF(kx, ky), QPointF(tx, ty)]))
+        if o.sex == "m" and o.scale >= 1:     # males: swollen palpal bulbs
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(base).darker(140))
+            p.drawEllipse(QPointF(tx, ty), w * 0.9, w * 0.75)
+
+
+def _light_segs(p, segs, ang, spec):
+    c, sn = math.cos(ang), math.sin(ang)
+    lx = LIGHT[0] * c + LIGHT[1] * sn
+    ly = -LIGHT[0] * sn + LIGHT[1] * c
+    p.setPen(Qt.NoPen)
+    for cx, cy, rx, ry in segs:
+        g = QRadialGradient(QPointF(cx + lx * rx * 0.45, cy + ly * ry * 0.45), max(rx, ry) * 1.3)
+        g.setColorAt(0.0, QColor(255, 255, 255, spec))
+        g.setColorAt(0.28, QColor(255, 255, 255, 0))
+        g.setColorAt(0.68, QColor(0, 0, 0, 0))
+        g.setColorAt(1.0, QColor(0, 0, 0, 130))
+        p.setBrush(g)
+        p.drawEllipse(QPointF(cx, cy), rx, ry)
+        # rim light on the far edge (thin silky backlight)
+        p.setPen(QPen(QColor(255, 255, 255, 28), 0.03))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(cx - rx, cy - ry, rx * 2, ry * 2),
+                  int(math.degrees(math.atan2(ly, -lx)) * 16) + 180 * 16 - 50 * 16, 100 * 16)
+        p.setPen(Qt.NoPen)
+    return lx, ly
+
+
+def _shadow_legs(p, o, k):
+    """Leg shadows: one stroked path per height band — merged (no dark overlaps),
+    and the higher the leg part, the fainter and softer its shadow."""
+    s = o.s
+    w0 = max(0.9, s * o.sp["thick"])
+    levels = [QPainterPath(), QPainterPath(), QPainterPath()]
+    for j in o.joints:
+        pts = [(x + z * SX, y + z * SY, z) for x, y, z in j]
+        for a, b in zip(pts, pts[1:]):
+            zz = (a[2] + b[2]) / 2
+            path = levels[0 if zz < s * 0.6 else 1 if zz < s * 1.2 else 2]
+            path.moveTo(a[0], a[1])
+            path.lineTo(b[0], b[1])
+    p.setBrush(Qt.NoBrush)
+    for n, (path, alpha) in enumerate(zip(levels, (60, 42, 26))):
+        p.setPen(QPen(QColor(0, 0, 0, int(alpha * k)), w0 * (0.85 + n * 0.3),
+                      Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(path)
 
 
 # ── Spider ──────────────────────────────────────────────
@@ -1150,7 +1447,9 @@ class Spider:
         self.lift = s * 0.55 + self.hh * 0.3
         self.react_r = max(80.0, self.R * 1.3)
 
-        self.body_img, self.body_rect, self.shadow_path = build_body(sp, s)
+        self.art, self.shadow_path = build_body(sp, s)
+        self.lag = 0.0
+        self.abd_ang = None
         self.segs = _segs(sp)
 
         self.x = self.y = 0.0
@@ -2324,6 +2623,13 @@ class Spider:
     # ── pose for rendering ──
 
     def pose(self):
+        # the abdomen trails the cephalothorax on its pedicel and sways against the gait
+        if self.abd_ang is None:
+            self.abd_ang = self.angle
+        self.abd_ang += _wrap_angle(self.angle - self.abd_ang) * 0.12
+        flex = self.art["flex"]
+        lag = _wrap_angle(self.abd_ang - self.angle)
+        self.lag = max(-0.35, min(0.35, lag)) * flex - self.wobble * 1.6 * flex
         if self.hidden or self.state == "roll":
             r = self.R if self.state == "roll" else self.s * 2
             self.joints = []
@@ -2403,20 +2709,7 @@ def draw_shadow(p, o):
         p.drawEllipse(hub, s * 1.2, s * 1.2)
         return
 
-    for width, alpha in ((w0 * 1.1, 60),):
-        p.setPen(QPen(QColor(0, 0, 0, int(alpha * k)), width,
-                      Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(Qt.NoBrush)
-        for j in o.joints:
-            fz = j[3][2]
-            if fz > s * 0.5:              # raised legs cast fainter, softer shadows
-                p.setPen(QPen(QColor(0, 0, 0, int(alpha * k * max(0.15, 1 - fz / (s * 2.5)))),
-                              width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                p.drawPolyline(QPolygonF([_shadow_pt(*pt) for pt in j]))
-                p.setPen(QPen(QColor(0, 0, 0, int(alpha * k)), width,
-                              Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            else:
-                p.drawPolyline(QPolygonF([_shadow_pt(*pt) for pt in j]))
+    _shadow_legs(p, o, k)
 
     bz = o.body_z()
     bx, by = o.x + o.ox, o.y + o.oy
@@ -2430,10 +2723,10 @@ def draw_shadow(p, o):
     p.drawImage(srect, simg)
     p.restore()
 
-    if o.z < s:  # ambient occlusion right under the body
+    if o.z < s:  # contact shadow right under the body
         r = s * 1.6
         g = QRadialGradient(QPointF(bx, by), r)
-        g.setColorAt(0, QColor(0, 0, 0, 60))
+        g.setColorAt(0, QColor(0, 0, 0, 70))
         g.setColorAt(1, QColor(0, 0, 0, 0))
         p.setPen(Qt.NoPen)
         p.setBrush(g)
@@ -2472,10 +2765,7 @@ def _draw_spider(p, o, leg_col=None):
     s = o.s
     sp = o.sp
     base = leg_col or QColor(sp["leg"])
-    hi = _col(sp["leg_hi"], 110)
-    band = QColor(sp["band"]) if sp["band"] else None
     w0 = max(0.8, s * sp["thick"])
-    widths = (w0, w0 * 0.75, w0 * 0.5)
 
     if o.state == "roll":
         spokes, Rw = _roll_spokes(o)
@@ -2498,7 +2788,7 @@ def _draw_spider(p, o, leg_col=None):
         p.restore()
         return
 
-    # Silk thread / dragline
+    # silk thread / dragline
     if o.thread:
         ax, ex, ey, alpha, attached = o.thread
         if attached:
@@ -2511,77 +2801,67 @@ def _draw_spider(p, o, leg_col=None):
         p.setPen(QPen(QColor(235, 240, 245, int(120 * alpha)), 0.7))
         p.drawLine(QPointF(x0, y0), QPointF(ex, ey))
 
-    # Legs
-    hairs = []
-    for j in o.joints:
-        pts = [QPointF(x, y) for x, y, _ in j]
-        for seg in range(3):
-            a, b = pts[seg], pts[seg + 1]
-            w = widths[seg]
-            p.setPen(QPen(base, w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.drawLine(a, b)
-            if band is not None and seg > 0:
-                mid = QPointF(a.x() + (b.x() - a.x()) * 0.3, a.y() + (b.y() - a.y()) * 0.3)
-                p.setPen(QPen(band, w * 1.05, Qt.SolidLine, Qt.FlatCap))
-                p.drawLine(a, mid)
-            if w > 2.5:
-                off = QPointF(-0.25 * w, -0.35 * w)
-                p.setPen(QPen(hi, w * 0.3, Qt.SolidLine, Qt.RoundCap))
-                p.drawLine(a + off, b + off)
-            if sp["hairy"] and seg < 2:
-                dx, dy = b.x() - a.x(), b.y() - a.y()
-                ln = math.hypot(dx, dy) or 1
-                nx, ny = -dy / ln * w * 1.1, dx / ln * w * 1.1
-                for t in (0.25, 0.5, 0.75):
-                    cx, cy = a.x() + dx * t, a.y() + dy * t
-                    hairs.append(QLineF(cx - nx, cy - ny, cx + nx - dx * 0.08, cy + ny - dy * 0.08))
-        if sp["knee"]:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(sp["knee"]))
-            p.drawEllipse(pts[1], w0 * sp["knee_r"] * 0.75, w0 * sp["knee_r"] * 0.75)
-    if hairs:
-        p.setPen(QPen(_col(sp["leg_hi"], 90), max(0.5, w0 * 0.12)))
-        p.drawLines(hairs)
+    _draw_legs(p, o, base)
 
-    # Body: cached texture + live lighting so highlights stay put as it turns
+    art = o.art
     a = o.angle + o.wobble
+    decor = sp["decor"]
+    front = getattr(decor, "front", False)
     p.save()
     p.translate(o.x + o.ox, o.y + o.oy)
     p.rotate(math.degrees(a))
     sc = s * (1 + (o.body_z() - o.hh) * 0.004)
     p.scale(sc, sc)
-    p.drawImage(o.body_rect, o.body_img)
-    decor = sp["decor"]
-    if decor:
-        decor(p, o, False)
 
-    c, sn = math.cos(a), math.sin(a)
-    lx = LIGHT[0] * c + LIGHT[1] * sn
-    ly = -LIGHT[0] * sn + LIGHT[1] * c
-    p.setPen(Qt.NoPen)
-    for cx, cy, rx, ry in o.segs:
-        g = QRadialGradient(QPointF(cx + lx * rx * 0.45, cy + ly * ry * 0.45), max(rx, ry) * 1.3)
-        g.setColorAt(0.0, QColor(255, 255, 255, sp["spec"]))
-        g.setColorAt(0.3, QColor(255, 255, 255, 0))
-        g.setColorAt(0.7, QColor(0, 0, 0, 0))
-        g.setColorAt(1.0, QColor(0, 0, 0, 120))
-        p.setBrush(g)
-        p.drawEllipse(QPointF(cx, cy), rx, ry)
-    if decor:
+    # abdomen: swings on the pedicel, lagging behind turns; breathes gently at rest
+    pv = art["pivot"]
+    p.save()
+    p.translate(pv, 0)
+    p.rotate(math.degrees(o.lag))
+    breathe = 1 + 0.012 * math.sin(o.frame * 0.05) * (1 if o.speed < 0.2 else 0)
+    p.scale(breathe, breathe)
+    p.translate(-pv, 0)
+    p.drawImage(art["rect"], art["abd"])
+    if decor and not front:
+        decor(p, o, False)
+    _light_segs(p, art["aseg"], a + o.lag, sp["spec"])
+    if decor and not front:
         decor(p, o, True)
+    if o.wrap > 0.02:
+        _wrap(p, art["aseg"], o.wrap)
+    p.restore()
+
+    _draw_palps(p, o, base)
+    p.drawImage(art["rect"], art["ceph"])
+    lx, ly = _light_segs(p, art["cseg"], a, sp["spec"])
+    if decor and front:
+        decor(p, o, False)
+        decor(p, o, True)
+    p.setPen(Qt.NoPen)                        # eye glints face the light, whatever the heading
+    for x, y, r in art["eyes"]:
+        p.setBrush(QColor(255, 255, 255, 210))
+        p.drawEllipse(QPointF(x + lx * r * 0.35, y + ly * r * 0.35), r * 0.32, r * 0.32)
+        p.setBrush(QColor(140, 170, 200, 70))
+        p.drawEllipse(QPointF(x - lx * r * 0.3, y - ly * r * 0.3), r * 0.45, r * 0.3)
     if o.carry_sac:                           # egg sac held in the fangs
         cx, rx, _ = sp["ceph"]
         _E(p, cx + rx + 0.4, 0, 0.45, 0.45, "#f4f0e6")
         _E(p, cx + rx + 0.3, -0.12, 0.15, 0.12, "#ffffff")
-    if o.wrap > 0.02:                         # silk-wrapped bundle
-        p.setBrush(QColor(246, 246, 250, int(215 * o.wrap)))
-        for cx, cy, rx, ry in o.segs:
-            p.drawEllipse(QPointF(cx, cy), rx * 1.12, ry * 1.12)
-        p.setPen(QPen(QColor(255, 255, 255, int(200 * o.wrap)), 0.05))
-        for k in range(int(10 * o.wrap)):
-            y = -0.6 + k * 0.13
-            p.drawLine(QPointF(-1.4, y), QPointF(0.9, -y * 0.8))
+    if o.wrap > 0.02:
+        _wrap(p, art["cseg"], o.wrap)
     p.restore()
+
+
+def _wrap(p, segs, wrap):
+    """A silk-wrapped bundle."""
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(246, 246, 250, int(215 * wrap)))
+    for cx, cy, rx, ry in segs:
+        p.drawEllipse(QPointF(cx, cy), rx * 1.12, ry * 1.12)
+    p.setPen(QPen(QColor(255, 255, 255, int(200 * wrap)), 0.05))
+    for k in range(int(10 * wrap)):
+        y = -0.6 + k * 0.13
+        p.drawLine(QPointF(-1.4, y), QPointF(0.9, -y * 0.8))
 
 
 def draw_fx(p, o):
@@ -2679,65 +2959,134 @@ PX_PER_CM = 14
 
 
 class Web:
-    """Orb, tangle (cobweb), funnel sheet, or tarantula silk mat."""
+    """Orb, tangle (cobweb), funnel sheet, or tarantula silk mat — built the way
+    the spiders build them, and drawn with silk that glints by angle to the light."""
 
     def __init__(self, owner, kind, cx, cy, r, corner):
         self.owner = owner
         self.species = owner.sp["name"]
         self.kind, self.cx, self.cy, self.r = kind, cx, cy, r
-        self.corner = corner                  # (cx, cy) of the screen corner/edge anchor
+        self.corner = corner                  # where it is anchored on the screen edge
         self.progress = 0.0
         self.integrity = 1.0
         self.cache = None
         rng = random.Random()
-        self.lines = []
         golden = self.species == "golden_orb"
         self.color = QColor(232, 205, 110) if golden else QColor(236, 240, 246)
+        self.lines, self.sag, self.lw, self.la = [], [], [], []
+        self.radials, self.spiral, self.frame, self.hubmesh = [], [], [], []
+        self.anchor_pts, self.drops = [], []
+        ax, ay = corner
         if kind == "orb":
-            n = rng.randint(18, 26)
-            self.radials = []
-            for k in range(n):
-                a = k * math.tau / n + rng.uniform(-0.08, 0.08)
-                rr = r * rng.uniform(0.85, 1.05)
-                self.radials.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
-            self.spiral = []
-            turns = rng.randint(14, 20)
-            m = turns * n
-            for k in range(m + 1):
-                f = k / m
-                a = f * turns * math.tau
-                rr = r * (0.18 + 0.78 * f) * rng.uniform(0.97, 1.03)
+            m = rng.randint(5, 7)             # irregular polygon frame
+            fa = sorted(k * math.tau / m + rng.uniform(-0.25, 0.25) for k in range(m))
+            fr = [r * rng.uniform(0.95, 1.12) for _ in range(m)]
+
+            self.frame = [(cx + math.cos(a) * rr, cy + math.sin(a) * rr) for a, rr in zip(fa, fr)]
+
+            def frame_rad(a):                 # where a ray from the hub meets the frame
+                dx, dy = math.cos(a), math.sin(a)
+                best = r
+                for (x0, y0), (x1, y1) in zip(self.frame, self.frame[1:] + self.frame[:1]):
+                    ex, ey = x1 - x0, y1 - y0
+                    den = dx * ey - dy * ex
+                    if abs(den) < 1e-9:
+                        continue
+                    t = ((x0 - cx) * ey - (y0 - cy) * ex) / den
+                    u = ((x0 - cx) * dy - (y0 - cy) * dx) / den
+                    if t > 0 and -1e-6 <= u <= 1 + 1e-6:
+                        best = t
+                return best
+            n = rng.randint(24, 32)
+            angs = [k * math.tau / n + rng.uniform(-0.06, 0.06) for k in range(n)]
+            lens = [frame_rad(a) * 0.97 for a in angs]
+            self.radials = [(cx + math.cos(a) * L, cy + math.sin(a) * L) for a, L in zip(angs, lens)]
+            # capture spiral: straight chords radial to radial, outside in, wider gaps outside
+            R = max(lens) * 0.93
+            k = 0
+            while R > r * 0.2 and k < n * 40:
+                a, L = angs[k % n], lens[k % n]
+                rr = min(R, L * 0.95)
                 self.spiral.append(QPointF(cx + math.cos(a) * rr, cy + math.sin(a) * rr))
-            ax, ay = corner
-            self.anchor_pts = []
-            for px, py in ((ax, cy), (cx, ay)):
-                if abs(px - cx) > 1 or abs(py - cy) > 1:
-                    self.anchor_pts.append((px, py))
-        else:
-            npts = {"tangle": 55, "sheet": 70, "mat": 40}[kind]
-            ax, ay = corner
-            for _ in range(npts):
-                def pt():
-                    a = rng.uniform(0, math.tau)
-                    rr = r * math.sqrt(rng.random())
-                    return cx + math.cos(a) * rr, cy + math.sin(a) * rr
-                if kind == "sheet" and rng.random() < 0.35:   # funnel lines into the corner
-                    x0, y0 = pt()
-                    self.lines.append((x0, y0, ax + (x0 - ax) * 0.15, ay + (y0 - ay) * 0.15))
-                elif kind == "mat":
-                    x0, y0 = pt()
-                    a = rng.uniform(0, math.tau)
-                    ln = r * rng.uniform(0.2, 0.6)
-                    self.lines.append((x0, y0, x0 + math.cos(a) * ln, y0 + math.sin(a) * ln))
+                R -= r * rng.uniform(0.034, 0.046) * (0.7 + 0.6 * R / r) / n
+                k += 1
+            # hub: a dense irregular mesh, then the open "free zone"
+            R, k = r * 0.03, 0
+            while R < r * 0.11:
+                a = angs[k % n]
+                self.hubmesh.append(QPointF(cx + math.cos(a) * R, cy + math.sin(a) * R))
+                R += r * 0.012 / n * rng.uniform(4, 8)
+                k += 1
+            # mooring threads from the frame to the walls / corner
+            fv = sorted(self.frame, key=lambda v: math.hypot(v[0] - ax, v[1] - ay))
+            for vx, vy in fv[:3]:
+                if abs(vx - ax) < abs(vy - ay):
+                    self.anchor_pts.append(((vx, vy), (ax, vy)))
                 else:
-                    x0, y0 = pt()
-                    x1, y1 = pt()
-                    self.lines.append((x0, y0, x1, y1))
-            if self.species == "black_widow":             # sticky gumfoot lines
-                for _ in range(7):
-                    x0 = cx + rng.uniform(-r, r) * 0.7
-                    y0 = cy + rng.uniform(-r, r) * 0.3
-                    self.lines.append((x0, y0, x0 + rng.uniform(-6, 6), y0 + r * rng.uniform(0.8, 1.4)))
+                    self.anchor_pts.append(((vx, vy), (vx, ay)))
+            for q0, q1 in zip(self.spiral, self.spiral[1:]):       # glue droplets
+                d = math.hypot(q1.x() - q0.x(), q1.y() - q0.y())
+                for t in range(int(d / 4.5)):
+                    f = (t + rng.random()) / max(1, d / 4.5)
+                    self.drops.append(QPointF(q0.x() + (q1.x() - q0.x()) * f,
+                                              q0.y() + (q1.y() - q0.y()) * f))
+            del self.drops[1400:]
+        else:
+            def inside(rad, bias=1.0):
+                a = rng.uniform(0, math.tau)
+                rr = rad * (rng.random() ** bias)
+                return cx + math.cos(a) * rr, cy + math.sin(a) * rr
+
+            def add(x0, y0, x1, y1, sag=0.0, w=0.6, a=1.0):
+                self.lines.append((x0, y0, x1, y1))
+                self.sag.append(sag)
+                self.lw.append(w)
+                self.la.append(a)
+            if kind == "tangle":
+                for _ in range(9):                # scaffold threads out to the walls, at angles
+                    x0, y0 = inside(r * 0.8)
+                    if rng.random() < 0.5:
+                        wx, wy = ax, y0 + rng.uniform(-r, r) * 0.6
+                    else:
+                        wx, wy = x0 + rng.uniform(-r, r) * 0.6, ay
+                    add(x0, y0, wx, wy, 0.0, 0.65, 0.8)
+                for _ in range(60):               # the tangle: sagging threads, denser to the corner
+                    x0, y0 = inside(r, 0.8)
+                    x1, y1 = inside(r, 0.8)
+                    d = math.hypot(x1 - x0, y1 - y0)
+                    add(x0, y0, x1, y1, d * rng.uniform(0.02, 0.1), rng.uniform(0.4, 0.75),
+                        rng.uniform(0.5, 1.0))
+                if self.species == "black_widow":  # gumfoot lines with sticky droplets
+                    for _ in range(8):
+                        x0 = cx + rng.uniform(-r, r) * 0.7
+                        y0 = cy + rng.uniform(-r, r) * 0.3
+                        y1 = y0 + r * rng.uniform(0.7, 1.3)
+                        add(x0, y0, x0 + rng.uniform(-5, 5), y1, 0.0, 0.5, 0.9)
+                        self.drops.append(QPointF(self.lines[-1][2], y1))
+            elif kind == "sheet":
+                hx, hy = self.hub()
+                for _ in range(110):              # dense sheet mesh
+                    x0, y0 = inside(r * 1.05, 0.7)
+                    x1, y1 = inside(r * 1.05, 0.7)
+                    add(x0, y0, x1, y1, 0.0, 0.4, rng.uniform(0.35, 0.8))
+                for k in range(14):               # funnel threads into the retreat
+                    a = rng.uniform(0, math.tau)
+                    x0, y0 = cx + math.cos(a) * r * 0.9, cy + math.sin(a) * r * 0.9
+                    add(x0, y0, hx + (ax - hx) * 0.5, hy + (ay - hy) * 0.5, 0.0, 0.5, 0.9)
+                for _ in range(8):                # scaffold above the sheet
+                    x0, y0 = inside(r * 0.9)
+                    if rng.random() < 0.5:
+                        wx, wy = ax, y0 + rng.uniform(-r, r) * 0.5
+                    else:
+                        wx, wy = x0 + rng.uniform(-r, r) * 0.5, ay
+                    add(x0, y0, wx, wy, 0.0, 0.55, 0.7)
+            else:                                 # mat: fibrous silk patch
+                for _ in range(70):
+                    x0, y0 = inside(r, 0.6)
+                    a = rng.uniform(0, math.tau)
+                    ln = r * rng.uniform(0.15, 0.5)
+                    add(x0, y0, x0 + math.cos(a) * ln, y0 + math.sin(a) * ln, ln * 0.15,
+                        rng.uniform(0.6, 1.2), rng.uniform(0.5, 1.0))
 
     def hub(self):
         if self.kind == "sheet":
@@ -2755,16 +3104,16 @@ class Web:
             self._layers(p, self.integrity)   # still being spun: draw live
             return
         if self.cache is None:                # finished webs never change shape
-            xs = [self.cx - self.r - 4, self.cx + self.r + 4]
-            ys = [self.cy - self.r - 4, self.cy + self.r + 4]
-            for x, y in getattr(self, "anchor_pts", []):
-                xs.append(x)
-                ys.append(y)
+            xs = [self.cx - self.r * 1.2, self.cx + self.r * 1.2]
+            ys = [self.cy - self.r * 1.2, self.cy + self.r * 1.4]
+            for (x0, y0), (x1, y1) in self.anchor_pts:
+                xs += (x0, x1)
+                ys += (y0, y1)
             for x0, y0, x1, y1 in self.lines:
                 xs += (x0, x1)
                 ys += (y0, y1)
-            x0, y0 = math.floor(min(xs)) - 2, math.floor(min(ys)) - 2
-            img = QImage(int(max(xs) - x0) + 4, int(max(ys) - y0) + 4,
+            x0, y0 = math.floor(min(xs)) - 4, math.floor(min(ys)) - 4
+            img = QImage(int(max(xs) - x0) + 8, int(max(ys) - y0) + 8,
                          QImage.Format_ARGB32_Premultiplied)
             img.fill(Qt.transparent)
             q = QPainter(img)
@@ -2787,53 +3136,102 @@ class Web:
         p.restore()
         self._paint(p, a)
 
+    @staticmethod
+    def _glint(x0, y0, x1, y1):
+        # silk flashes when the strand runs across the light
+        la = math.atan2(LIGHT[1], LIGHT[0])
+        return 0.45 + 0.55 * abs(math.sin(math.atan2(y1 - y0, x1 - x0) - la))
+
     def _paint(self, p, a, dark=False):
         if dark:
-            a *= 0.6
-        col = QColor(30, 32, 40) if dark else QColor(self.color)
+            a *= 0.55
+        base = QColor(30, 32, 40) if dark else QColor(self.color)
+
+        def pen(alpha, w):
+            c = QColor(base)
+            c.setAlpha(max(0, min(255, int(alpha * a))))
+            return QPen(c, w, Qt.SolidLine, Qt.RoundCap)
+
+        cx, cy = self.cx, self.cy
         if self.kind == "orb":
             k = self.progress
             nr = int(len(self.radials) * min(1.0, k / 0.3))
-            col.setAlpha(int(120 * a))
-            p.setPen(QPen(col, 0.7))
+            if nr:
+                for v0, v1 in zip(self.frame, self.frame[1:] + self.frame[:1]):
+                    p.setPen(pen(150, 0.9))
+                    p.drawLine(QPointF(*v0), QPointF(*v1))
+                for q0, q1 in self.anchor_pts:
+                    p.setPen(pen(140, 0.9))
+                    p.drawLine(QPointF(*q0), QPointF(*q1))
             for x, y in self.radials[:nr]:
-                p.drawLine(QPointF(self.cx, self.cy), QPointF(x, y))
-            if k > 0.3 and nr:
-                for x, y in self.anchor_pts:
-                    p.drawLine(QPointF(self.cx, self.cy), QPointF(x, y))
+                p.setPen(pen(135 * self._glint(cx, cy, x, y), 0.7))
+                p.drawLine(QPointF(cx, cy), QPointF(x, y))
+            if k > 0.3:
                 ns = int(len(self.spiral) * (k - 0.3) / 0.7)
-                if ns > 2:
-                    col.setAlpha(int(85 * a))
-                    p.setPen(QPen(col, 0.55))
-                    p.drawPolyline(QPolygonF(self.spiral[-ns:]))
+                pts = self.spiral[:ns]
+                for q0, q1 in zip(pts, pts[1:]):
+                    p.setPen(pen(110 * self._glint(q0.x(), q0.y(), q1.x(), q1.y()), 0.55))
+                    p.drawLine(q0, q1)
+                if len(self.hubmesh) > 1:
+                    p.setPen(pen(120, 0.5))
+                    p.drawPolyline(QPolygonF(self.hubmesh))
+                if not dark and k >= 1:       # glue droplets catching the light
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(255, 255, 255, int(70 * a)))
+                    for d in self.drops[::2]:
+                        p.drawEllipse(d, 0.45, 0.45)
             if k >= 1 and self.species == "wasp_spider":  # zig-zag stabilimentum
-                col.setAlpha(int(200 * a))
-                p.setPen(QPen(col, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setPen(QPen(QColor(base.red(), base.green(), base.blue(), int(210 * a)), 2.2,
+                              Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
                 for d in (-1, 1):
-                    pts = [QPointF(self.cx + (5 if j % 2 else -5), self.cy + d * (8 + j * 5))
+                    pts = [QPointF(cx + (5 if j % 2 else -5), cy + d * (8 + j * 5))
                            for j in range(int(self.r / 7))]
                     p.drawPolyline(QPolygonF(pts))
             if k >= 1 and self.species == "spiny_orb":    # silk tufts on the frame
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor(30, 32, 40, int(170 * a)) if dark
-                           else QColor(255, 255, 255, int(170 * a)))
+                p.setBrush(QColor(base.red(), base.green(), base.blue(), int(170 * a)))
                 for x, y in self.radials[::3]:
                     p.drawEllipse(QPointF(x, y), 1.6, 1.6)
-        else:
-            n = int(len(self.lines) * self.progress)
-            alpha = {"tangle": 70, "sheet": 55, "mat": 45}[self.kind]
-            col.setAlpha(int(alpha * a))
-            p.setPen(QPen(col, 0.6 if self.kind != "mat" else 1.2))
-            for x0, y0, x1, y1 in self.lines[:n]:
+            return
+        n = int(len(self.lines) * self.progress)
+        boost = {"tangle": 1.0, "sheet": 0.75, "mat": 0.65}[self.kind]
+        p.setBrush(Qt.NoBrush)
+        for (x0, y0, x1, y1), sag, w, al in zip(self.lines[:n], self.sag, self.lw, self.la):
+            p.setPen(pen(105 * boost * al * self._glint(x0, y0, x1, y1), w))
+            if sag:
+                path = QPainterPath(QPointF(x0, y0))
+                path.quadTo(QPointF((x0 + x1) / 2, (y0 + y1) / 2 + sag), QPointF(x1, y1))
+                p.drawPath(path)
+            else:
                 p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
-            if self.kind in ("sheet", "mat") and self.progress > 0.5:
-                g = QRadialGradient(QPointF(*self.hub()), self.r)
-                tone = (30, 32, 40) if dark else (240, 240, 245)
-                g.setColorAt(0, QColor(*tone, int(55 * a * self.progress)))
-                g.setColorAt(1, QColor(*tone, 0))
-                p.setPen(Qt.NoPen)
-                p.setBrush(g)
-                p.drawEllipse(QPointF(*self.hub()), self.r, self.r)
+        if self.kind in ("sheet", "mat") and self.progress > 0.5:
+            hx, hy = self.hub()
+            tone = (30, 32, 40) if dark else (240, 240, 245)
+            g = QRadialGradient(QPointF(hx, hy), self.r)
+            g.setColorAt(0, QColor(*tone, int(60 * a * self.progress)))
+            g.setColorAt(1, QColor(*tone, 0))
+            p.setPen(Qt.NoPen)
+            p.setBrush(g)
+            p.drawEllipse(QPointF(hx, hy), self.r, self.r)
+            if self.kind == "sheet":          # the funnel: rings narrowing into a dark tube
+                ax, ay = self.corner
+                for t in range(6):
+                    f = t / 6
+                    rr = self.r * (0.32 - f * 0.25)
+                    tx, ty = hx + (ax - hx) * f * 0.6, hy + (ay - hy) * f * 0.6
+                    p.setPen(pen(70, 0.6))
+                    p.setBrush(Qt.NoBrush)
+                    p.drawEllipse(QPointF(tx, ty), rr, rr * 0.8)
+                if not dark:
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(20, 18, 16, int(70 * a)))
+                    p.drawEllipse(QPointF(hx + (ax - hx) * 0.5, hy + (ay - hy) * 0.5),
+                                  self.r * 0.08, self.r * 0.065)
+        if not dark and self.drops:           # gumfoot glue
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 250, 230, int(190 * a)))
+            for d in self.drops:
+                p.drawEllipse(d, 1.3, 1.3)
 
 
 class EggSac:
