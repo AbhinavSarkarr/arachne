@@ -13,11 +13,11 @@ version = os.environ.get("ARACHNE_VERSION", "2.0.0")
 a = Analysis(
     [os.path.join(root, "arachne.py")],
     pathex=[root],
-    hiddenimports=["colony", "spiders", "papillon", "PyQt5.sip", "PyQt5.QtCore", "PyQt5.QtGui",
+    hiddenimports=["colony", "spiders", "papillon", "dex", "PyQt5.QtMultimedia", "PyQt5.sip", "PyQt5.QtCore", "PyQt5.QtGui",
                    "PyQt5.QtWidgets", "PyQt5.QtNetwork", "numpy"]
     + (["Xlib", "Xlib.ext.shape", "Xlib.display"] if linux else []),
     excludes=["tkinter", "PyQt5.QtWebEngineWidgets", "PyQt5.QtWebEngineCore", "PyQt5.QtQml",
-              "PyQt5.QtQuick", "PyQt5.QtMultimedia", "PyQt5.QtBluetooth", "PyQt5.QtSql"],
+              "PyQt5.QtQuick", "PyQt5.QtBluetooth", "PyQt5.QtSql"],
 )
 pyz = PYZ(a.pure)
 

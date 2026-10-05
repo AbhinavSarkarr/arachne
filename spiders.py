@@ -20,6 +20,8 @@ import random
 import time
 import copy
 
+import numpy as np
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt, QPointF, QRectF, QLineF, QTimer
 from PyQt5.QtGui import (
@@ -46,6 +48,7 @@ BODY_DPR = 3.0                # body texture supersampling
 FREEZE_RADIUS = 200
 
 SPECIAL_FRAMES = {
+    "eyewipe": (50, 90),
     "groom": (60, 120), "bounce": (40, 90), "whirl": (70, 130),
     "shake": (40, 70), "dead": (160, 320), "threat": (130, 220),
     "hiss": (60, 100), "hairflick": (90, 130), "spit": (45, 45),
@@ -66,6 +69,11 @@ class _World:
     hides = []                    # QRectF regions spiders can slip under (windows)
     cursor = (-1e4, -1e4)
     windows = []                  # [(window id, QRectF)] real app windows (X11 only)
+    ambient = None                # small QImage of the screen behind us (None = unknown)
+    ambient_full = None
+    rain = 0.0                    # 0..1 current rain strength
+    wind = 0.0                    # signed gust strength, -1..1
+    ambient_size = (1, 1)
     cursor_still = 0.0            # seconds the cursor has rested
     flick = 0.0                   # cursor speed spike, px/frame
     log = None                    # callable(text, kind) for the colony journal
@@ -81,8 +89,17 @@ NAMES = ("Mira", "Kavi", "Tara", "Juno", "Bodhi", "Ira", "Nyx", "Sol", "Riya", "
 _uid = [0]
 
 
+_COMMON = {"nursery_web": "Nursery Web Spider", "social_spider": "Social Cobweb Spider",
+           "golden_orb": "Golden Orb Weaver", "garden_cross": "Garden Cross Spider",
+           "spiny_orb": "Spiny Orb Weaver", "net_caster": "Net-casting Spider",
+           "bird_dropping": "Bird-dropping Spider", "bagheera": "Bagheera Jumping Spider",
+           "golden_wheel": "Golden Wheel Spider", "flower_crab": "Flower Crab Spider",
+           "diving_bell": "Diving Bell Spider", "ant_mimic": "Ant-mimic Jumper",
+           "goliath_birdeater": "Goliath Birdeater", "gooty_sapphire": "Gooty Sapphire Tarantula"}
+
+
 def common_name(name):
-    return name.replace("_", " ").title()
+    return _COMMON.get(name) or name.replace("_", " ").title()
 
 
 # ── Painting helpers (unit coords: +x forward, 1 = body unit) ─────────
@@ -486,6 +503,20 @@ def _pat_dewdrop(p, cp, ap, sp, rng):
     p.restore()
 
 
+def _pat_nursery(p, cp, ap, sp, rng):
+    cx, rx, ry = sp["ceph"]
+    ax, arx, ary = sp["abd"]
+    _E(p, cx, 0, rx * 0.9, 0.07, "#e8dcc0", 220)      # the pale midline stripe
+    _clip(p, ap)
+    _E(p, ax + 0.3, 0, arx * 0.5, 0.1, "#3a2a1c", 200)
+    p.setPen(QPen(_col("#3a2a1c", 170), 0.06))
+    for i in range(4):
+        x = ax - 0.05 - i * 0.2
+        p.drawLine(QPointF(x, 0), QPointF(x - 0.15, -0.28))
+        p.drawLine(QPointF(x, 0), QPointF(x - 0.15, 0.28))
+    p.restore()
+
+
 def _pat_diving(p, cp, ap, sp, rng):
     _fur(p, ap, ["#8a8a88", "#3a3a38"], 120, rng, 0.08, 0.03)
 
@@ -705,6 +736,15 @@ def _ground_bird(p, o):
 def _ground_trapdoor(p, o):
     bx, by = o.burrow
     r = o.s * 1.45
+    if not hasattr(o, "triplines"):           # silk trip-lines fanning out from the door
+        rng = random.Random()
+        o.triplines = [(rng.uniform(0, math.tau), r * rng.uniform(1.8, 2.8)) for _ in range(7)]
+    for dark in (True, False):
+        p.setPen(QPen(QColor(30, 32, 40, 45) if dark else QColor(240, 240, 245, 90), 0.6))
+        off = 1.2 if dark else 0
+        for a, ln in o.triplines:
+            p.drawLine(QPointF(bx + math.cos(a) * r * 0.9 + off, by + math.sin(a) * r * 0.9 + off),
+                       QPointF(bx + math.cos(a) * ln + off, by + math.sin(a) * ln + off))
     hinge = o.lid_angle + math.pi                 # lid hinges at the back
     hx, hy = bx + math.cos(hinge) * r, by + math.sin(hinge) * r
     open_ = o.lid
@@ -954,6 +994,11 @@ SPECIES = [
         ceph_col="#b8682a", abd_col="#d8dde4", pat=_pat_dewdrop, spec=200,
         leg="#c8783a", leg_hi="#f0b080", thick=0.07,
         speed=0.9, walk=(30, 100), pause=(60, 200)),
+    _sp("nursery_web", 1, size=(11, 13), reach=(3.0, 2.8, 2.4, 3.0),
+        ceph=(0.45, 0.5, 0.4), abd=(-0.85, 0.85, 0.42),
+        ceph_col="#8a6a4a", abd_col="#7a5a3c", pat=_pat_nursery,
+        leg="#8a6a4a", leg_hi="#c8a880", thick=0.11, hairy=True, eyes="wolf",
+        speed=2.2, walk=(30, 100), pause=(60, 240)),
     _sp("diving_bell", 3, size=(12, 14), reach=(2.2, 2.0, 1.8, 2.3),
         ceph=(0.45, 0.5, 0.4), abd=(-0.72, 0.72, 0.52),
         ceph_col="#6a4a2a", abd_col="#5a5a58", pat=_pat_diving,
@@ -983,6 +1028,50 @@ ABD_FLEX = {"spiny_orb": 0.25, "bird_dropping": 0.35, "crab_spider": 0.5, "flowe
             "mirror_spider": 0.6}
 SPINY_LEGS = {"house_spider", "wolf_spider", "huntsman", "wandering_spider", "garden_cross",
               "golden_orb", "wasp_spider", "golden_wheel", "spitting_spider"}
+
+
+def _noise_image(rng, w, h):
+    """Smooth value noise (three octaves) as a greyscale QImage — natural mottling."""
+    acc = None
+    for octave, weight in ((6, 0.55), (14, 0.3), (34, 0.15)):
+        gw, gh = max(2, int(octave * w / max(w, h)) + 2), max(2, int(octave * h / max(w, h)) + 2)
+        g = np.array([rng.random() for _ in range(gw * gh)], dtype=np.float32).reshape(gh, gw)
+        img = QImage((g * 255).astype(np.uint8).tobytes(), gw, gh, gw, QImage.Format_Grayscale8)
+        img = img.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(
+            QImage.Format_Grayscale8)
+        ptr = img.constBits()
+        ptr.setsize(img.byteCount())
+        a = np.frombuffer(ptr, np.uint8).reshape(h, img.bytesPerLine())[:, :w].astype(np.float32)
+        acc = a * weight if acc is None else acc + a * weight
+    acc = ((acc - acc.min()) / max(1.0, acc.max() - acc.min()) * 255).astype(np.uint8)
+    out = QImage(acc.tobytes(), w, h, w, QImage.Format_Grayscale8)
+    return out.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+
+
+def _micro(p, path, rect, sp, rng, strength=0.32):
+    """Bake realistic surface detail: soft mottling (overlay) and a fine pelt of setae."""
+    w = max(8, int(rect.width() * 24))
+    h = max(8, int(rect.height() * 24))
+    p.save()
+    p.setClipPath(path)
+    p.setOpacity(strength)
+    p.setCompositionMode(QPainter.CompositionMode_Overlay)
+    p.drawImage(rect, _noise_image(rng, w, h))
+    p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+    p.setOpacity(1.0)
+    if sp["spec"] < 150:                       # glossy species stay smooth
+        hi = QColor(sp["leg_hi"])
+        b = path.boundingRect()
+        for _ in range(int(b.width() * b.height() * 110)):
+            x = b.left() + rng.random() * b.width()
+            y = b.top() + rng.random() * b.height()
+            a = math.pi + rng.gauss(0, 0.6) + y * 0.9
+            ln = rng.uniform(0.04, 0.09)
+            c = QColor(hi)
+            c.setAlpha(rng.randint(25, 70))
+            p.setPen(QPen(c, 0.012, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(x, y), QPointF(x + math.cos(a) * ln, y + math.sin(a) * ln))
+    p.restore()
 
 
 def _layer_painter(img, k, x0, half):
@@ -1055,6 +1144,13 @@ def build_body(sp, s):
     p.drawLine(QPointF(ax + arx * 0.75, 0), QPointF(ax + arx * 0.1, 0))
     p.restore()
     rng = random.Random(sp["name"] + "fur")
+    unit = QRectF(x0, -half, x1 - x0, 2 * half)
+    apath = QPainterPath()
+    apath.setFillRule(Qt.WindingFill)
+    apath.addPath(ap)
+    for e in back:
+        apath.addEllipse(QPointF(e[0], e[1]), e[2], e[3])
+    _micro(p, apath, unit, sp, rng)
     if sp["hairy"]:
         hi = QColor(sp["leg_hi"]).name()
         _fur(p, ap, [hi, "#000000", hi], 260, rng, 0.13, 0.028)
@@ -1104,6 +1200,7 @@ def build_body(sp, s):
             p.drawLine(QPointF(cx - rx * 0.2 + math.cos(r_) * rx * 0.18, side * math.sin(r_) * ry * 0.18),
                        QPointF(cx - rx * 0.2 + math.cos(r_) * rx * 0.75, side * math.sin(r_) * ry * 0.75))
     p.restore()
+    _micro(p, cp, QRectF(x0, -half, x1 - x0, 2 * half), sp, rng, 0.26)
     if sp["hairy"]:
         hi = QColor(sp["leg_hi"]).name()
         _fur(p, cp, [hi, "#000000", hi], 120, rng, 0.11, 0.026)
@@ -1328,6 +1425,16 @@ def _draw_palps(p, o, base):
     cx, rx, ry = sp["ceph"]
     w = max(0.05, sp["thick"] * 0.75)
     walk = min(1.0, o.speed / max(0.3, sp["speed"]))
+    if o.state == "special" and o.special == "eyewipe" and o.art["eyes"]:
+        ex, ey, er = max(o.art["eyes"], key=lambda e: e[2])
+        p.setPen(QPen(base, w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        for side in (-1, 1):                   # palps sweep across the big front eyes
+            sweep = math.sin(o.frame * 0.35 + side) * 0.12
+            bx, by = cx + rx * 0.62, side * ry * 0.38
+            p.drawPolyline(QPolygonF([QPointF(bx, by), QPointF(ex + 0.25, side * 0.3),
+                                      QPointF(ex + 0.02, side * abs(ey) + sweep)]))
+        return
     for side in (-1, 1):
         ph = o.frame * (0.35 if walk > 0.1 else 0.06) + (0 if side < 0 else math.pi)
         swing = math.sin(ph) * (0.22 * walk + 0.08)
@@ -1344,6 +1451,35 @@ def _draw_palps(p, o, base):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(base).darker(140))
             p.drawEllipse(QPointF(tx, ty), w * 0.9, w * 0.75)
+
+
+def ambient_at(x, y):
+    """Colour of the desktop under (x, y), or None when the screen can't be sampled."""
+    img = WORLD.ambient
+    if img is None:
+        return None
+    sw, sh = WORLD.ambient_size
+    ix = min(img.width() - 1, max(0, int(x / sw * img.width())))
+    iy = min(img.height() - 1, max(0, int(y / sh * img.height())))
+    return QColor(img.pixel(ix, iy))
+
+
+def _gloss(p, segs, lx, ly, sp, frame):
+    if sp["spec"] >= 150:                      # glassy cuticle: a crisp highlight + window streak
+        p.setPen(Qt.NoPen)
+        for cx, cy, rx, ry in segs:
+            hx, hy = cx + lx * rx * 0.5, cy + ly * ry * 0.5
+            p.setBrush(QColor(255, 255, 255, 215))
+            p.drawEllipse(QPointF(hx, hy), rx * 0.13, ry * 0.09)
+            p.setBrush(QColor(255, 255, 255, 60))
+            p.drawEllipse(QPointF(hx - lx * rx * 0.25, hy - ly * ry * 0.25), rx * 0.32, ry * 0.08)
+    if sp["gait"] == "jumper":                 # iridescent scales flash as it turns
+        hue = (0.5 + 0.25 * math.sin(frame * 0.02 + math.atan2(ly, lx) * 2)) % 1.0
+        p.setBrush(Qt.NoBrush)
+        for cx, cy, rx, ry in segs:
+            p.setPen(QPen(QColor.fromHsvF(hue, 0.7, 1.0, 0.35), 0.05))
+            p.drawArc(QRectF(cx - rx * 0.92, cy - ry * 0.92, rx * 1.84, ry * 1.84),
+                      int(math.degrees(math.atan2(-ly, lx)) * 16) - 60 * 16, 120 * 16)
 
 
 def _light_segs(p, segs, ang, spec):
@@ -1382,8 +1518,9 @@ def _shadow_legs(p, o, k):
             path.moveTo(a[0], a[1])
             path.lineTo(b[0], b[1])
     p.setBrush(Qt.NoBrush)
+    r, g, b = getattr(o, "_shadow_rgb", (0, 0, 0))   # shadows take the colour of the surface
     for n, (path, alpha) in enumerate(zip(levels, (60, 42, 26))):
-        p.setPen(QPen(QColor(0, 0, 0, int(alpha * k)), w0 * (0.85 + n * 0.3),
+        p.setPen(QPen(QColor(r, g, b, int(alpha * k)), w0 * (0.85 + n * 0.3),
                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.drawPath(path)
 
@@ -1445,7 +1582,7 @@ class Spider:
         self.R = max(reach) * s * 1.1
         self.thr = sum(reach) / 4 * s * 0.38
         self.lift = s * 0.55 + self.hh * 0.3
-        self.react_r = max(80.0, self.R * 1.3)
+        self.react_r = max(80.0, self.R * 1.3) * (1.3 - 0.6 * getattr(self, "bold", 0.5))
 
         self.art, self.shadow_path = build_body(sp, s)
         self.lag = 0.0
@@ -1484,6 +1621,12 @@ class Spider:
         self.hidden = False
         self.fan = 0.0
         self.plates = self.plate_t = 1.0
+        self.stamina = 1.0            # hydraulic legs tire fast: sprint, then must rest
+        self.bold = random.betavariate(2, 2)     # 0 shy … 1 bold, for life
+        self.fear = []                # places it was attacked: avoided for a while
+        self.climb = 0                # frames left of a "going over an edge" tilt
+        self._in_win = None
+        self.emerge = None            # molting: sliding out of the old skin
         self.gone = False             # eaten / ballooned away
         self.struggle = 0.0
         self.caught_k = 0.9
@@ -1675,6 +1818,8 @@ class Spider:
     def _start_pause(self, lo=None, hi=None):
         lo = lo if lo is not None else self.sp["pause"][0]
         hi = hi if hi is not None else self.sp["pause"][1]
+        lazy = 1.5 if getattr(self, "hunger", 0.5) < 0.2 else 1.0     # well fed: sits longer
+        hi = int(hi * (1.3 - 0.5 * getattr(self, "bold", 0.5)) * lazy)
         self._set("pause", random.randint(lo, max(lo, hi)))
 
     def _start_flee(self, fx, fy, frames=None, sideways=False):
@@ -1818,6 +1963,15 @@ class Spider:
 
         st = self.state
         if self.interaction is None:
+            if st == "paralyzed":
+                until = getattr(self, "paralyzed_until", None)
+                if until and time.monotonic() > until:
+                    self.paralyzed_until = None
+                    self.plant_all()
+                    self._start_pause(60, 120)
+                    return
+                self._tuck(self.caught_k, wiggle=self.struggle)
+                return
             if st in ("caught", "dead", "grapple", "stuck", "mate"):
                 # moved by the ecology (fights, feeding, mating)
                 self.struggle *= 0.995 if st == "dead" else 1.0
@@ -1827,6 +1981,17 @@ class Spider:
                 return
             if st == "molt":
                 self._tuck(0.5, wiggle=0.05)
+                return
+            if st == "emerge":
+                sx, sy, tx, ty, t0, t1 = self.emerge
+                k = min(1.0, (time.monotonic() - t0) / (t1 - t0))
+                e = _smooth(k)
+                self.x, self.y = sx + (tx - sx) * e, sy + (ty - sy) * e
+                self._tuck(0.4 + 0.6 * k, wiggle=0.15 * (1 - k))
+                if k >= 1:
+                    self.emerge = None
+                    self.plant_all()
+                    self._start_pause(120, 240)   # stays still while the new cuticle hardens
                 return
             if st == "balloon":
                 self.z += 0.6 + self.z * 0.01
@@ -1877,9 +2042,23 @@ class Spider:
             self.angle = math.pi / 2 - sway * 0.02
             self._tuck(0.75, wiggle=0.25)
             if dy <= 1:
+                self._set("bounce", 70)
+            return
+
+        if st == "bounce":                     # the line stretches and recoils, the body spins
+            self.timer -= 1
+            k = 1 - self.timer / self.timer_total
+            self.y = self.land_y + math.sin(k * math.pi * 4) * self.s * 1.3 * (1 - k)
+            self.angle = math.pi / 2 + math.sin(k * math.pi * 3) * 0.5 * (1 - k)
+            self._tuck(0.75, wiggle=0.3)
+            if self.timer <= 0:
                 self._set("land", 24)
                 self.thread[4] = False
                 self.thread[1], self.thread[2] = self._spinneret()
+            return
+
+        if st in ("drop", "dangle", "climb"):   # escape drop on a dragline, then climb back
+            self._silk_escape(st)
             return
 
         if st == "land":
@@ -1940,6 +2119,50 @@ class Spider:
         self._behave(mx, my, mouse_moving)
         self._move()
         self._step_legs()
+
+    def drop(self):
+        """Let go and fall on a dragline (web spiders' classic escape)."""
+        if self.state in ("drop", "dangle", "climb") or self.interaction is not None:
+            return
+        self.drop_from = (self.x, self.y, self.state)
+        self.drop_to = min(self.sh - self.R, self.y + random.uniform(90, 200))
+        self.vz = 0.0
+        self.thread = [self.x, 0, 0, 1.0, True, self.y]
+        self._set("drop", 999)
+
+    def _silk_escape(self, st):
+        x0, y0, prev = self.drop_from
+        self.z += (self.s * 2.5 - self.z) * 0.2
+        if st == "drop":
+            self.vz = min(9.0, self.vz + 0.6)
+            self.y += self.vz
+            self._tuck(0.55, wiggle=0.1)
+            if self.y >= self.drop_to:
+                self._set("dangle", random.randint(180, 360))
+                self.dangle_k = 0
+        elif st == "dangle":                  # bob on the line, legs folded, playing dead
+            self.timer -= 1
+            self.dangle_k += 1
+            self.y = self.drop_to + math.sin(self.dangle_k * 0.25) * self.s * 1.2 * math.exp(
+                -self.dangle_k / 60)
+            self.angle = math.pi / 2 + math.sin(self.dangle_k * 0.06) * 0.3
+            self._tuck(0.45)
+            if self.timer <= 0:
+                self._set("climb", 9999)
+        else:                                 # hand over hand back up the line
+            self.angle += _wrap_angle(-math.pi / 2 - self.angle) * 0.2
+            pull = (self.frame // 10) % 2
+            self.y -= 1.2 if pull else 0.3
+            self._tuck(0.8, wiggle=0.5)
+            if self.y <= y0:
+                self.y, self.z = y0, 0.0
+                self.thread[4] = False
+                self.thread[1], self.thread[2] = self.x, self.y
+                self.plant_all()
+                if self.web is not None:
+                    self._set("hub", 99999)
+                else:
+                    self._start_pause()
 
     def _update_burrow(self, mx, my):
         bx, by = self.burrow
@@ -2061,8 +2284,17 @@ class Spider:
         st = self.state
         ts = 0.0
 
+        if self.climb > 0:                     # going over a window edge: body pitches up
+            self.climb -= 1
+            self.rear_t = max(self.rear_t, 0.5 * math.sin(math.pi * self.climb / 24))
+        if st == "hub" and self.cool <= 0 and sp["threat"] in ("dead", "freeze") \
+                and self.web is not None and dist < self.react_r and mouse_moving:
+            self.cool = 400
+            self.drop()                        # web spiders drop on a line when disturbed
+            return
         if st in ECO_STATES:
             ts = self._eco_behave(st, mx, my)
+            ts = self._fatigue(ts, st)
             self.rear += (self.rear_t - self.rear) * 0.15
             self.speed += (ts - self.speed) * (0.3 if ts > self.speed else 0.4)
             return
@@ -2093,6 +2325,10 @@ class Spider:
             else:
                 self.turn = max(-0.045, min(0.045, self.turn * 0.96 + random.gauss(0, 0.006)))
                 self.angle += self.turn
+            now_ = time.monotonic()
+            for fx, fy, ft in self.fear[-4:]:   # remembered danger: give that spot a wide berth
+                if now_ - ft < 600 and math.hypot(self.x - fx, self.y - fy) < 170:
+                    self._steer(math.atan2(self.y - fy, self.x - fx), 0.08, 0.05)
             inward = self._inward()
             if inward is not None:
                 self._steer(inward, 0.1, 0.06)
@@ -2107,6 +2343,8 @@ class Spider:
             for name, prob in sp["idle"].items():
                 if name == "display" and self.sex != "m":
                     continue                     # only males court with the fan
+                if name == "groom" and sp["gait"] == "jumper" and random.random() < 0.4:
+                    name = "eyewipe"
                 if name in ("holdnet", "bolas"):  # nets and bolas come out at night
                     if WORLD.night < 0.5:
                         continue
@@ -2190,6 +2428,7 @@ class Spider:
                 target = math.pi / 2 if self.y > self.sh / 2 else -math.pi / 2
             self._steer(target, 0.05, 0.04)
 
+        ts = self._fatigue(ts, st)
         self.rear += (self.rear_t - self.rear) * 0.15
         ease = 0.25 if ts > self.speed else 0.35     # quick start, abrupt stop
         self.speed += (ts - self.speed) * ease
@@ -2200,9 +2439,19 @@ class Spider:
         return max(0.0, min(1.0, k * edge, (1 - k) * edge))
 
     def _sp_groom(self, k):
+        """Draw a leg slowly through the chelicerae, tip first, then the next leg."""
         cx, rx, ry = self.sp["ceph"]
-        w = math.sin(self.frame * 0.25) * 0.12
-        self.ov(0, ("p", cx + rx + 0.1 + w, 0.18, self.hh * 1.2 + self.s * 0.2), self.sdata)
+        leg = 0 if k < 0.6 else 1
+        t = (k * (1 / 0.6) if k < 0.6 else (k - 0.6) / 0.4) % 1.0
+        pull = (t * 2.5) % 1.0                 # a few strokes per leg
+        mx, my = cx + rx + 0.12, 0.08
+        ox, oy = cx + rx + 0.15 + pull * 0.8, 0.12 + pull * 0.55
+        self.ov(leg, ("p", ox, oy, self.hh * 1.25 + self.s * 0.25), self.sdata)
+        if leg == 1:
+            self.ov(0, ("p", mx + 0.25, my + 0.2, self.hh * 1.1), self.sdata)
+
+    def _sp_eyewipe(self, k):
+        pass                                   # the palps do the work (see _draw_palps)
 
     def _sp_bounce(self, k):
         self.bob = math.sin(self.frame * 0.55) * self.s * 0.6 * (1 - k)
@@ -2427,16 +2676,9 @@ class Spider:
             if w is None:
                 self._start_pause()
                 return 0.0
-            k = w.progress
-            if w.kind == "orb":               # circle the hub, laying spiral
-                ang = k * math.tau * 9
-                rad = w.r * (0.15 + 0.8 * min(1.0, k * 1.2))
-                tx, ty = w.cx + math.cos(ang) * rad, w.cy + math.sin(ang) * rad
-            else:
-                tx = w.cx + math.sin(k * 37) * w.r * 0.5
-                ty = w.cy + math.cos(k * 23) * w.r * 0.5
-            self._face(tx, ty, 0.2)
-            return min(2.0, math.hypot(tx - self.x, ty - self.y) * 0.15)
+            tx, ty = w.build_point(w.progress)   # follow the thread being laid
+            self._face(tx, ty, 0.25)
+            return min(8.0, math.hypot(tx - self.x, ty - self.y) * 0.35)
 
         if st == "hub":
             if self.web is not None and self.web.kind == "orb":
@@ -2490,7 +2732,9 @@ class Spider:
                 self._goto(tx, ty, out)       # walk back out, don't pop
             return 0.0
 
-        if st == "guard":
+        if st == "guard":                      # standing over the nursery
+            if self.timer <= 0:
+                self._start_pause()
             return 0.0
         return 0.0
 
@@ -2508,12 +2752,31 @@ class Spider:
         self.special = None
         self.z = 0.0
 
+    def _fatigue(self, ts, st):
+        """Spider legs extend by haemolymph pressure: a few seconds of sprinting, then rest."""
+        fast = self.speed > max(2.5, self.sp["speed"] * 1.15)
+        if fast:
+            self.stamina = max(0.0, self.stamina - 0.011)
+        else:
+            self.stamina = min(1.0, self.stamina + 0.005)
+        if self.stamina < 0.12 and ts > 0:
+            if st in ("walk", "flee") and fast:
+                self._start_pause(50, 110)    # out of breath
+                return 0.0
+            return min(ts, max(0.6, self.sp["speed"] * 0.5))
+        return ts
+
     def _move(self):
         md = self.angle + self.side_walk * math.pi / 2
         self.vx = math.cos(md) * self.speed
         self.vy = math.sin(md) * self.speed
         self.x += self.vx
         self.y += self.vy
+        if WORLD.windows:
+            inside = any(r.contains(self.x, self.y) for _, r in WORLD.windows)
+            if self._in_win is not None and inside != self._in_win:
+                self.climb = 24
+            self._in_win = inside
         if self.state not in ("enter", "exit") and self.hide_rect is None:
             m = self.R * 0.5
             self.x = max(m, min(self.sw - m, self.x))
@@ -2709,6 +2972,9 @@ def draw_shadow(p, o):
         p.drawEllipse(hub, s * 1.2, s * 1.2)
         return
 
+    amb = ambient_at(o.x, o.y)
+    o._shadow_rgb = ((amb.red() // 5, amb.green() // 5, amb.blue() // 4) if amb is not None
+                     else (0, 0, 0))
     _shadow_legs(p, o, k)
 
     bz = o.body_z()
@@ -2733,11 +2999,12 @@ def draw_shadow(p, o):
         p.drawEllipse(QPointF(bx, by), r, r)
 
     if o.thread:
-        ax, ex, ey, alpha, attached = o.thread
+        ax, ex, ey, alpha, attached = o.thread[:5]
+        ay = o.thread[5] if len(o.thread) > 5 else -30
         if attached:
             ex, ey = o._spinneret()
         p.setPen(QPen(QColor(0, 0, 0, int(60 * alpha)), 1.0))
-        p.drawLine(QPointF(ax + s * 4 * SX, -30), QPointF(ex + bz * SX, ey + bz * SY))
+        p.drawLine(QPointF(ax + s * 4 * SX, ay), QPointF(ex + bz * SX, ey + bz * SY))
 
 
 def draw_spider(p, o):
@@ -2790,17 +3057,26 @@ def _draw_spider(p, o, leg_col=None):
 
     # silk thread / dragline
     if o.thread:
-        ax, ex, ey, alpha, attached = o.thread
+        ax, ex, ey, alpha, attached = o.thread[:5]
+        ay = o.thread[5] if len(o.thread) > 5 else -30
         if attached:
             ex, ey = o._spinneret()
         p.setPen(QPen(QColor(230, 235, 240, int(150 * alpha)), 0.8))
-        p.drawLine(QPointF(ax, -30), QPointF(ex, ey))
+        p.drawLine(QPointF(ax, ay), QPointF(ex, ey))
     if o.drag:
         x0, y0, alpha, _ = o.drag
         ex, ey = o._spinneret()
         p.setPen(QPen(QColor(235, 240, 245, int(120 * alpha)), 0.7))
         p.drawLine(QPointF(x0, y0), QPointF(ex, ey))
 
+    pale = 0.0
+    if o.soft_until:
+        pale = max(0.0, min(1.0, (o.soft_until - time.monotonic()) / 120))
+    if pale > 0:                               # freshly molted: soft and pale, darkening
+        b = QColor(base)
+        base = QColor(int(b.red() + (235 - b.red()) * 0.65 * pale),
+                      int(b.green() + (228 - b.green()) * 0.65 * pale),
+                      int(b.blue() + (215 - b.blue()) * 0.65 * pale))
     _draw_legs(p, o, base)
 
     art = o.art
@@ -2824,7 +3100,8 @@ def _draw_spider(p, o, leg_col=None):
     p.drawImage(art["rect"], art["abd"])
     if decor and not front:
         decor(p, o, False)
-    _light_segs(p, art["aseg"], a + o.lag, sp["spec"])
+    alx, aly = _light_segs(p, art["aseg"], a + o.lag, sp["spec"])
+    _gloss(p, art["aseg"], alx, aly, sp, o.frame)
     if decor and not front:
         decor(p, o, True)
     if o.wrap > 0.02:
@@ -2832,15 +3109,50 @@ def _draw_spider(p, o, leg_col=None):
     p.restore()
 
     _draw_palps(p, o, base)
+    tilt = 1 - 0.22 * max(0.0, o.rear)
+    ccx = sp["ceph"][0]
+    p.save()
+    p.translate(ccx, 0)
+    p.scale(tilt, 1)
+    p.translate(-ccx, 0)
     p.drawImage(art["rect"], art["ceph"])
     lx, ly = _light_segs(p, art["cseg"], a, sp["spec"])
+    _gloss(p, art["cseg"], lx, ly, sp, o.frame)
+    p.restore()
     if decor and front:
         decor(p, o, False)
         decor(p, o, True)
+    if pale > 0:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(240, 234, 222, int(150 * pale)))
+        for cx, cy, rx, ry in art["cseg"]:
+            p.drawEllipse(QPointF(cx, cy), rx, ry)
+        p.save()
+        p.translate(art["pivot"], 0)
+        p.rotate(math.degrees(o.lag))
+        p.translate(-art["pivot"], 0)
+        for cx, cy, rx, ry in art["aseg"]:
+            p.drawEllipse(QPointF(cx, cy), rx, ry)
+        p.restore()
+    amb = ambient_at(o.x, o.y)                 # bounce light from whatever is underneath
+    if amb is not None:
+        c = QColor(amb)
+        c.setAlpha(34)
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        for cx, cy, rx, ry in art["cseg"]:
+            p.drawEllipse(QPointF(cx, cy), rx, ry)
     p.setPen(Qt.NoPen)                        # eye glints face the light, whatever the heading
+    mx, my = WORLD.cursor
+    torch = 0.0
+    if WORLD.night > 0.5:
+        torch = max(0.0, 1 - math.hypot(mx - o.x, my - o.y) / 180) * WORLD.night
     for x, y, r in art["eyes"]:
         p.setBrush(QColor(255, 255, 255, 210))
         p.drawEllipse(QPointF(x + lx * r * 0.35, y + ly * r * 0.35), r * 0.32, r * 0.32)
+        if torch > 0.05:                       # tapetum: eyes flash back like tiny gems
+            p.setBrush(QColor(200, 255, 220, int(230 * torch)))
+            p.drawEllipse(QPointF(x, y), r * (0.6 + 0.5 * torch), r * (0.6 + 0.5 * torch))
         p.setBrush(QColor(140, 170, 200, 70))
         p.drawEllipse(QPointF(x - lx * r * 0.3, y - ly * r * 0.3), r * 0.45, r * 0.3)
     if o.carry_sac:                           # egg sac held in the fangs
@@ -2928,10 +3240,12 @@ ECO = {
     "diving_bell":       _eco(0.3, 0.5, 0.4, 0.4, 0.35, 0.5, "none", "corner_low", "SW", 5, 0.1, 1.15),
 }
 ECO["social_spider"] = _eco(0.05, 0.4, 0.2, 0.4, 1.0, 0.0, "tangle", "edge", "SW", 5, 0.0, 0.8)
+ECO["nursery_web"] = _eco(0.25, 0.5, 0.45, 0.5, 0.2, 0.3, "none", "floor", "AH", 8, 0.15, 0.85)
 ECO["dewdrop_spider"] = _eco(0.1, 0.2, 0.15, 0.6, 0.5, 0.1, "none", "edge", "W", 10, 0.05, 0.85)
 DIURNAL = {"zebra_jumper", "crab_spider", "wasp_spider", "golden_orb", "spiny_orb", "ant_mimic",
            "regal_jumper", "bird_dropping", "bagheera", "peacock_spider", "flower_crab"}
-ACTIVE_TIME = {n: ("D" if n in DIURNAL else "B" if n in ("social_spider", "dewdrop_spider") else "N")
+ACTIVE_TIME = {n: ("D" if n in DIURNAL else "B" if n in ("social_spider", "dewdrop_spider",
+                                                              "nursery_web") else "N")
                for n in ECO}
 LIFESPAN_YEARS = {"house_spider": 2, "cellar_spider": 2.5, "black_widow": 1.5, "wolf_spider": 1.5,
                   "huntsman": 2, "redknee_tarantula": 15, "goliath_birdeater": 12,
@@ -2944,7 +3258,8 @@ PREY_MULT = {"ant_mimic": 0.33, "spiny_orb": 0.3}
 
 ECO_STATES = {"goto", "hunt", "seek", "feed", "build", "hub", "court", "spin", "ball", "guard", "hide"}
 DEADISH = {"dead", "husk", "caught"}
-ECO_BUSY = ECO_STATES | DEADISH | {"grapple", "stuck", "mate", "molt", "balloon"}
+ECO_BUSY = ECO_STATES | DEADISH | {"grapple", "stuck", "mate", "molt", "balloon", "emerge", "paralyzed",
+                                   "drop", "dangle", "climb", "bounce"}
 FREE = {"walk", "pause", "turn", "watch", "stalk", "special", "hub", "goto", "guard"}
 TARGETABLE = FREE | {"feed", "build", "stuck", "molt", "court", "ball", "spin", "seek", "hunt", "flee"}
 
@@ -2975,6 +3290,9 @@ class Web:
         self.color = QColor(232, 205, 110) if golden else QColor(236, 240, 246)
         self.lines, self.sag, self.lw, self.la = [], [], [], []
         self.radials, self.spiral, self.frame, self.hubmesh = [], [], [], []
+        self.aux, self.bridge, self.eat, self.wet = [], None, False, 0.0
+        self.tremble = False
+        self.broken = 0.0
         self.anchor_pts, self.drops = [], []
         ax, ay = corner
         if kind == "orb":
@@ -3019,11 +3337,22 @@ class Web:
                 k += 1
             # mooring threads from the frame to the walls / corner
             fv = sorted(self.frame, key=lambda v: math.hypot(v[0] - ax, v[1] - ay))
-            for vx, vy in fv[:3]:
-                if abs(vx - ax) < abs(vy - ay):
-                    self.anchor_pts.append(((vx, vy), (ax, vy)))
+            ddx, ddy = abs(cx - ax), abs(cy - ay)
+            for i, (vx, vy) in enumerate(fv[:3]):
+                if ddy > 2 * ddx or (ddx <= 2 * ddy and ddy <= 2 * ddx and i % 2 == 0):
+                    self.anchor_pts.append(((vx, vy), (vx, ay)))     # up/down to a horizontal wall
                 else:
-                    self.anchor_pts.append(((vx, vy), (vx, ay)))
+                    self.anchor_pts.append(((vx, vy), (ax, vy)))     # across to a vertical wall
+            # temporary (auxiliary) spiral, laid hub-outwards and eaten as the sticky one goes in
+            R, k = r * 0.12, 0
+            while R < max(lens) * 0.85 and k < n * 12:
+                a, L = angs[k % n], lens[k % n]
+                self.aux.append(QPointF(cx + math.cos(a) * min(R, L * 0.9),
+                                        cy + math.sin(a) * min(R, L * 0.9)))
+                R += r * 0.11 / n
+                k += 1
+            iv = min(range(m), key=lambda i: math.hypot(self.frame[i][0] - ax, self.frame[i][1] - ay))
+            self.bridge = (self.frame[iv], self.frame[(iv + m // 2) % m])
             for q0, q1 in zip(self.spiral, self.spiral[1:]):       # glue droplets
                 d = math.hypot(q1.x() - q0.x(), q1.y() - q0.y())
                 for t in range(int(d / 4.5)):
@@ -3097,12 +3426,49 @@ class Web:
     def contains(self, x, y):
         return math.hypot(x - self.cx, y - self.cy) < self.r
 
+    # orb construction schedule (fractions of progress):
+    # bridge 0–.06 · frame .06–.14 · radials .14–.45 · temporary spiral .45–.58 · sticky spiral .58–1
+    def build_point(self, k):
+        """Where the builder is working right now."""
+        cx, cy = self.cx, self.cy
+        if self.kind != "orb" or not self.radials:
+            return cx + math.sin(k * 37) * self.r * 0.5, cy + math.cos(k * 23) * self.r * 0.5
+        if k < 0.06 and self.bridge:
+            (x0, y0), (x1, y1) = self.bridge
+            f = k / 0.06
+            return x0 + (x1 - x0) * f, y0 + (y1 - y0) * f
+        if k < 0.14:
+            m = len(self.frame)
+            f = (k - 0.06) / 0.08 * m
+            i = min(m - 1, int(f))
+            (x0, y0), (x1, y1) = self.frame[i], self.frame[(i + 1) % m]
+            return x0 + (x1 - x0) * (f - i), y0 + (y1 - y0) * (f - i)
+        if k < 0.45:                            # out along each new radial and back
+            n = len(self.radials)
+            f = (k - 0.14) / 0.31 * n
+            i = min(n - 1, int(f))
+            ex, ey = self.radials[i]
+            d = math.sin(math.pi * (f - i))
+            return cx + (ex - cx) * d, cy + (ey - cy) * d
+        if k < 0.58 and self.aux:
+            q = self.aux[min(len(self.aux) - 1, int((k - 0.45) / 0.13 * len(self.aux)))]
+            return q.x(), q.y()
+        if self.spiral:
+            q = self.spiral[min(len(self.spiral) - 1, int((k - 0.58) / 0.42 * len(self.spiral)))]
+            return q.x(), q.y()
+        return cx, cy
+
     def draw(self, p):
         if self.progress <= 0.01 or self.integrity <= 0.02:
             return
         if self.progress < 1.0:
             self._layers(p, self.integrity)   # still being spun: draw live
             return
+        bucket = 0 if self.integrity > 0.7 else 1 if self.integrity > 0.4 else 2
+        if self.cache is not None and getattr(self, "cache_bucket", 0) != bucket:
+            self.cache = None                  # damage shows: re-render with broken strands
+        self.cache_bucket = bucket
+        self.broken = (0.0, 0.35, 0.7)[bucket]
         if self.cache is None:                # finished webs never change shape
             xs = [self.cx - self.r * 1.2, self.cx + self.r * 1.2]
             ys = [self.cy - self.r * 1.2, self.cy + self.r * 1.4]
@@ -3125,6 +3491,13 @@ class Web:
         img, x0, y0 = self.cache
         p.save()
         p.setOpacity(self.integrity)
+        sway = WORLD.wind * math.sin(time.monotonic() * 1.7 + self.cx * 0.013)
+        jx = random.uniform(-0.8, 0.8) if self.tremble else 0.0
+        jy = random.uniform(-0.8, 0.8) if self.tremble else 0.0
+        hx, hy = self.hub()
+        p.translate(hx, hy)
+        p.scale(1 + sway * 0.02, 1 - sway * 0.012)  # the sheet billows in a gust
+        p.translate(-hx + sway * 3 + jx, -hy + jy)
         p.drawImage(QPointF(x0, y0), img)
         p.restore()
 
@@ -3143,6 +3516,7 @@ class Web:
         return 0.45 + 0.55 * abs(math.sin(math.atan2(y1 - y0, x1 - x0) - la))
 
     def _paint(self, p, a, dark=False):
+        glint = (lambda *xy: 0.7) if dark else self._glint   # shadows don't sparkle
         if dark:
             a *= 0.55
         base = QColor(30, 32, 40) if dark else QColor(self.color)
@@ -3155,23 +3529,50 @@ class Web:
         cx, cy = self.cx, self.cy
         if self.kind == "orb":
             k = self.progress
-            nr = int(len(self.radials) * min(1.0, k / 0.3))
-            if nr:
-                for v0, v1 in zip(self.frame, self.frame[1:] + self.frame[:1]):
-                    p.setPen(pen(150, 0.9))
-                    p.drawLine(QPointF(*v0), QPointF(*v1))
+            clamp = (lambda v: max(0.0, min(1.0, v)))
+            if self.bridge and k < 0.14:
+                (x0, y0), (x1, y1) = self.bridge
+                f = clamp(k / 0.06)
+                p.setPen(pen(150, 0.9))
+                p.drawLine(QPointF(x0, y0), QPointF(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f))
+            m = len(self.frame)
+            nf = m if k >= 0.14 else int(clamp((k - 0.06) / 0.08) * m)
+            for v0, v1 in list(zip(self.frame, self.frame[1:] + self.frame[:1]))[:nf]:
+                p.setPen(pen(150, 0.9))
+                p.drawLine(QPointF(*v0), QPointF(*v1))
+            if k > 0.06:
                 for q0, q1 in self.anchor_pts:
                     p.setPen(pen(140, 0.9))
                     p.drawLine(QPointF(*q0), QPointF(*q1))
+            nr = int(len(self.radials) * clamp((k - 0.14) / 0.31)) if k < 1 else len(self.radials)
             for x, y in self.radials[:nr]:
-                p.setPen(pen(135 * self._glint(cx, cy, x, y), 0.7))
+                p.setPen(pen(135 * glint(cx, cy, x, y), 0.7))
                 p.drawLine(QPointF(cx, cy), QPointF(x, y))
-            if k > 0.3:
-                ns = int(len(self.spiral) * (k - 0.3) / 0.7)
+            if 0.45 < k < 1 and self.aux:     # the temporary spiral, fading as it is eaten
+                na = int(len(self.aux) * clamp((k - 0.45) / 0.13))
+                fade = 1.0 if k < 0.58 else 1 - (k - 0.58) / 0.42
+                p.setPen(pen(110 * fade, 0.6))
+                p.drawPolyline(QPolygonF(self.aux[:na]))
+            if k > 0.58:
+                ns = len(self.spiral) if k >= 1 else int(len(self.spiral) * (k - 0.58) / 0.42)
                 pts = self.spiral[:ns]
-                for q0, q1 in zip(pts, pts[1:]):
-                    p.setPen(pen(110 * self._glint(q0.x(), q0.y(), q1.x(), q1.y()), 0.55))
+                gap = self.broken if k >= 1 else 0.0
+                for i, (q0, q1) in enumerate(zip(pts, pts[1:])):
+                    if gap and (i * 2654435761 % 1000) / 1000 < gap * 0.55:
+                        continue               # torn chords
+                    p.setPen(pen(110 * glint(q0.x(), q0.y(), q1.x(), q1.y()), 0.55))
                     p.drawLine(q0, q1)
+                if gap:                        # loose strands hanging from the damage
+                    rng = random.Random(int(self.cx * 7 + self.cy))
+                    for _ in range(int(gap * 10)):
+                        q = rng.choice(pts)
+                        ln = rng.uniform(12, 38)
+                        path = QPainterPath(q)
+                        path.quadTo(QPointF(q.x() + rng.uniform(-8, 8), q.y() + ln * 0.6),
+                                    QPointF(q.x() + rng.uniform(-14, 14), q.y() + ln))
+                        p.setPen(pen(90, 0.5))
+                        p.setBrush(Qt.NoBrush)
+                        p.drawPath(path)
                 if len(self.hubmesh) > 1:
                     p.setPen(pen(120, 0.5))
                     p.drawPolyline(QPolygonF(self.hubmesh))
@@ -3197,7 +3598,7 @@ class Web:
         boost = {"tangle": 1.0, "sheet": 0.75, "mat": 0.65}[self.kind]
         p.setBrush(Qt.NoBrush)
         for (x0, y0, x1, y1), sag, w, al in zip(self.lines[:n], self.sag, self.lw, self.la):
-            p.setPen(pen(105 * boost * al * self._glint(x0, y0, x1, y1), w))
+            p.setPen(pen(105 * boost * al * glint(x0, y0, x1, y1), w))
             if sag:
                 path = QPainterPath(QPointF(x0, y0))
                 path.quadTo(QPointF((x0 + x1) / 2, (y0 + y1) / 2 + sag), QPointF(x1, y1))
@@ -3234,13 +3635,77 @@ class Web:
                 p.drawEllipse(d, 1.3, 1.3)
 
 
+class Flower:
+    """A flower head a crab spider has settled on: bees come to it."""
+
+    def __init__(self, x, y, kind):
+        self.x, self.y, self.kind = x, y, kind
+        rng = random.Random()
+        self.petals = [(rng.uniform(0, math.tau), rng.uniform(0.8, 1.15)) for _ in range(
+            13 if kind == "daisy" else 30)]
+        self.owner = None
+
+    def draw(self, p):
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 40))
+        p.drawEllipse(QPointF(self.x + 4, self.y + 6), 26, 24)
+        if self.kind == "daisy":
+            for a, k in self.petals:
+                p.save()
+                p.translate(self.x, self.y)
+                p.rotate(math.degrees(a))
+                p.setBrush(QColor(250, 250, 246))
+                p.setPen(QPen(QColor(205, 205, 200), 0.5))
+                p.drawEllipse(QPointF(14 * k, 0), 9 * k, 3.4)
+                p.restore()
+            p.setPen(Qt.NoPen)
+            g = QRadialGradient(QPointF(self.x - 2, self.y - 2), 8)
+            g.setColorAt(0, QColor("#ffe060"))
+            g.setColorAt(1, QColor("#d89a10"))
+            p.setBrush(g)
+            p.drawEllipse(QPointF(self.x, self.y), 7, 7)
+        else:                                 # goldenrod: a spray of tiny yellow florets
+            for a, k in self.petals:
+                x, y = self.x + math.cos(a) * 16 * k, self.y + math.sin(a) * 13 * k
+                p.setBrush(QColor(242, 200, 40))
+                p.drawEllipse(QPointF(x, y), 3.2, 3.2)
+                p.setBrush(QColor(255, 236, 120))
+                p.drawEllipse(QPointF(x - 0.8, y - 0.8), 1.3, 1.3)
+
+
+class Tent:
+    """Nursery-web spider's silk tent over her egg sac."""
+
+    def __init__(self, x, y, r):
+        self.x, self.y, self.r = x, y, r
+        rng = random.Random()
+        self.lines = [(rng.uniform(0, math.tau), rng.uniform(0, math.tau)) for _ in range(26)]
+        self.until = None
+
+    def draw(self, p):
+        p.setPen(Qt.NoPen)
+        g = QRadialGradient(QPointF(self.x - self.r * 0.2, self.y - self.r * 0.25), self.r * 1.1)
+        g.setColorAt(0, QColor(255, 255, 255, 120))
+        g.setColorAt(1, QColor(230, 232, 238, 40))
+        p.setBrush(g)
+        p.drawEllipse(QPointF(self.x, self.y), self.r, self.r * 0.85)
+        for dark in (True, False):
+            p.setPen(QPen(QColor(30, 32, 40, 50) if dark else QColor(255, 255, 255, 110), 0.6))
+            off = 1.3 if dark else 0
+            for a0, a1 in self.lines:
+                p.drawLine(QPointF(self.x + math.cos(a0) * self.r + off, self.y + math.sin(a0) * self.r * 0.85 + off),
+                           QPointF(self.x + math.cos(a1) * self.r + off, self.y + math.sin(a1) * self.r * 0.85 + off))
+
+
 class EggSac:
     def __init__(self, mother, x, y, hatch_at):
         self.base = mother.base_sp
         self.mother = mother
         self.x, self.y = x, y
         self.hatch_at = hatch_at
-        self.carried = mother.sp["name"] in ("wolf_spider", "cellar_spider", "spitting_spider")
+        self.carried = mother.sp["name"] in ("wolf_spider", "cellar_spider", "spitting_spider",
+                                             "nursery_web")
+        self.tent = None
         name = mother.sp["name"]
         self.r = max(3.0, mother.s * 0.7)
         self.style = ("tan" if name == "black_widow" else
@@ -3300,6 +3765,8 @@ INSECT_KINDS = {
     "fruitfly": dict(s=1.9, body="#c08a4a", wing=(230, 230, 236), speed=1.3, land=0.01, eye="#c02020"),
     "moth":     dict(s=4.6, body="#8a7258", wing=(168, 148, 118), speed=2.0, land=0.004, eye="#202020"),
     "bee":      dict(s=3.6, body="#e0b020", wing=(228, 230, 240), speed=2.8, land=0.0, eye="#202020"),
+    "mosquito": dict(s=2.3, body="#4a4038", wing=(220, 225, 235), speed=1.2, land=0.012, eye="#202020"),
+    "dragonfly": dict(s=8.5, body="#2a7a8a", wing=(225, 235, 245), speed=6.5, land=0.0, eye="#1a4a5a"),
 }
 
 
@@ -3370,8 +3837,14 @@ class Insect:
         want = math.atan2(self.goal[1] - self.y, self.goal[0] - self.x)
         jitter = 0.5 if self.kind in ("fly", "fruitfly") else 0.25
         self.heading += _wrap_angle(want - self.heading) * 0.08 + random.gauss(0, jitter)
-        self.x += math.cos(self.heading) * self.speed
-        self.y += math.sin(self.heading) * self.speed
+        if self.kind == "dragonfly" and random.random() < 0.01:
+            self.hover = random.randint(40, 120)   # dragonflies stop dead and hover
+        if getattr(self, "hover", 0) > 0:
+            self.hover -= 1
+        else:
+            self.x += math.cos(self.heading) * self.speed
+            self.y += math.sin(self.heading) * self.speed
+        self.x += WORLD.wind * (1.6 if self.kind in ("fruitfly", "mosquito") else 0.7)
         self.z += (35 - self.z) * 0.05 + math.sin(self.phase * 0.1) * 0.5
         self.angle = self.heading
         if self.life <= 0 and not (-60 < self.x < self.sw + 60 and -60 < self.y < self.sh + 60):
@@ -3407,6 +3880,27 @@ def draw_insect(p, b, shadow):
                                      QPointF(-s * 1.3, side * s * 0.4)]))
         else:
             p.drawEllipse(QPointF(-s * 0.35, side * s * (0.55 + 0.35 * flap)), s * 0.9, s * 0.42)
+    if b.kind == "dragonfly":                 # long abdomen, four glassy wings, huge eyes
+        p.setPen(QPen(QColor(60, 80, 90, 120), 0.4))
+        p.setBrush(QColor(225, 235, 245, 70))
+        for side in (-1, 1):
+            for dx, ln in ((0.25, 1.9), (-0.15, 1.7)):
+                wob = math.sin(b.phase * 1.3 + dx * 7) * 0.12
+                p.drawEllipse(QPointF(s * dx, side * s * (0.95 + wob)), s * 0.28, s * 0.95)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(k["body"]))
+        p.drawRoundedRect(QRectF(-s * 1.9, -s * 0.09, s * 1.9, s * 0.18), s * 0.08, s * 0.08)
+        p.drawEllipse(QPointF(s * 0.15, 0), s * 0.34, s * 0.22)
+        p.setBrush(QColor("#1a4a5a"))
+        for side in (-1, 1):
+            p.drawEllipse(QPointF(s * 0.55, side * s * 0.14), s * 0.2, s * 0.18)
+        p.restore()
+        return
+    if b.kind == "mosquito":                  # long dangly legs
+        p.setPen(QPen(QColor(60, 50, 44, 160), 0.35))
+        for side in (-1, 1):
+            for dx in (0.3, 0.0, -0.3):
+                p.drawLine(QPointF(s * dx, 0), QPointF(s * (dx - 0.4), side * s * 1.8))
     if b.state in ("land", "stuck"):          # six little legs
         p.setPen(QPen(QColor(k["body"]).darker(150), 0.5))
         for side in (-1, 1):
@@ -3429,6 +3923,243 @@ def draw_insect(p, b, shadow):
     p.restore()
 
 
+class AntTrail:
+    """A column of ants crossing the box along a winding scent trail."""
+
+    def __init__(self, sw, sh):
+        rng = random.Random()
+        horizontal = rng.random() < 0.5
+        if horizontal:
+            a, b = (-20, rng.uniform(0.2, 0.8) * sh), (sw + 20, rng.uniform(0.2, 0.8) * sh)
+        else:
+            a, b = (rng.uniform(0.2, 0.8) * sw, -20), (rng.uniform(0.2, 0.8) * sw, sh + 20)
+        if rng.random() < 0.5:
+            a, b = b, a
+        self.pts = []
+        for i in range(9):
+            t = i / 8
+            x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+            off = math.sin(t * math.pi * rng.uniform(1.5, 3)) * rng.uniform(40, 110) if 0 < i < 8 else 0
+            nx, ny = (0, 1) if horizontal else (1, 0)
+            self.pts.append((x + nx * off, y + ny * off))
+        self.lens = [0.0]
+        for (x0, y0), (x1, y1) in zip(self.pts, self.pts[1:]):
+            self.lens.append(self.lens[-1] + math.hypot(x1 - x0, y1 - y0))
+        self.total = self.lens[-1]
+        self.ants = []                         # distance along the trail, wobble phase
+        self.to_spawn = rng.randint(18, 30)
+        self.clock = 0
+        self.gone = False
+
+    def at(self, d):
+        d = max(0.0, min(self.total, d))
+        for i in range(len(self.pts) - 1):
+            if d <= self.lens[i + 1]:
+                f = (d - self.lens[i]) / max(1e-6, self.lens[i + 1] - self.lens[i])
+                (x0, y0), (x1, y1) = self.pts[i], self.pts[i + 1]
+                return x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, math.atan2(y1 - y0, x1 - x0)
+        x, y = self.pts[-1]
+        return x, y, 0.0
+
+    def update(self):
+        self.clock += 1
+        if self.to_spawn and self.clock % 45 == 0:
+            self.ants.append([0.0, random.uniform(0, 6.28), random.uniform(0.9, 1.3)])
+            self.to_spawn -= 1
+        for a in self.ants:
+            a[0] += a[2]
+            a[1] += 0.4
+        self.ants = [a for a in self.ants if a[0] < self.total]
+        if not self.ants and not self.to_spawn:
+            self.gone = True
+
+    def positions(self):
+        out = []
+        for d, ph, _ in self.ants:
+            x, y, ang = self.at(d)
+            w = math.sin(ph) * 3
+            out.append((x - math.sin(ang) * w, y + math.cos(ang) * w, ang + math.sin(ph * 0.7) * 0.25, ph))
+        return out
+
+
+def draw_ants(p, trail, shadow):
+    for x, y, ang, ph in trail.positions():
+        if shadow:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 45))
+            p.drawEllipse(QPointF(x + 1.5, y + 2), 4.5, 1.8)
+            continue
+        p.save()
+        p.translate(x, y)
+        p.rotate(math.degrees(ang))
+        p.setPen(QPen(QColor(30, 20, 14), 0.5))
+        for side in (-1, 1):                   # tripod gait: legs swing in alternation
+            for i, dx in enumerate((1.2, 0.3, -0.6)):
+                sw_ = math.sin(ph * 2 + i * math.pi + (side > 0) * math.pi) * 0.6
+                p.drawLine(QPointF(dx, 0), QPointF(dx + sw_ + 0.4, side * 3.0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(28, 18, 12))
+        p.drawEllipse(QPointF(2.6, 0), 1.2, 1.0)
+        p.drawEllipse(QPointF(0.6, 0), 1.3, 0.8)
+        p.drawEllipse(QPointF(-2.0, 0), 1.9, 1.4)
+        p.setBrush(QColor(255, 255, 255, 70))
+        p.drawEllipse(QPointF(-2.3, -0.5), 0.8, 0.4)
+        p.restore()
+
+
+class SpiderWasp:
+    """A tarantula hawk: hunts big ground spiders, stings, and drags them off."""
+
+    def __init__(self, sw, sh):
+        self.sw, self.sh = sw, sh
+        e = random.randint(0, 3)
+        self.x, self.y = ((random.uniform(0, sw), -30), (random.uniform(0, sw), sh + 30),
+                          (-30, random.uniform(0, sh)), (sw + 30, random.uniform(0, sh)))[e]
+        self.z = 30.0
+        self.angle = math.atan2(sh / 2 - self.y, sw / 2 - self.x)
+        self.state = "search"
+        self.target = None
+        self.timer = 60 * 90
+        self.phase = 0.0
+        self.s = 7.0
+        self.gone = False
+        self.goal = None
+
+    def update(self, eco, live):
+        self.phase += 1
+        self.timer -= 1
+        st = self.state
+        t = self.target
+        if st == "search":
+            if self.goal is None or math.hypot(self.goal[0] - self.x, self.goal[1] - self.y) < 30:
+                self.goal = (random.uniform(100, self.sw - 100), random.uniform(100, self.sh - 100))
+            if self.phase % 30 == 0:
+                prey = [o for o in live if o.state in ("walk", "pause", "turn", "hub", "goto")
+                        and o.web is None and not o.hidden and o.z == 0 and o.scale >= 1
+                        and o.s >= 7 and o.base_sp["spawn"] != "burrow"]
+                if prey:
+                    self.target = min(prey, key=lambda o: math.hypot(o.x - self.x, o.y - self.y))
+                    self.state = "hunt"
+            self._fly_to(*self.goal, 3.2)
+            if self.timer <= 0:
+                self.state = "leave"
+        elif st == "hunt":
+            if t is None or t.gone or t.state in DEADISH or t.hidden or t.interaction is not None:
+                self.state, self.target = "search", None
+                return
+            d = math.hypot(t.x - self.x, t.y - self.y)
+            if d > 140:
+                self._fly_to(t.x, t.y, 4.0)
+            else:                              # lands and runs in, wings flicking
+                self.z *= 0.85
+                a = math.atan2(t.y - self.y, t.x - self.x) + math.sin(self.phase * 0.5) * 0.4
+                self.angle = a
+                self.x += math.cos(a) * 4.5
+                self.y += math.sin(a) * 4.5
+                if d < t.R * 0.35 + 10:
+                    self.state, self.sting_t = "sting", 90
+                    t.state, t.special = "grapple", None
+                    t.struggle, t.caught_k = 1.3, 0.9
+        elif st == "sting":
+            self.sting_t -= 1
+            if t is None or t.gone or t.interaction is not None:
+                self.state = "leave"
+                return
+            self.x += random.uniform(-1.5, 1.5)
+            self.y += random.uniform(-1.5, 1.5)
+            if self.sting_t <= 0:
+                if random.random() < 0.8 - 0.35 * t.eco["fight"]:
+                    t.state, t.struggle, t.caught_k = "paralyzed", 0.08, 0.75
+                    self.state = "drag"
+                    ex = -80 if t.x < self.sw / 2 else self.sw + 80
+                    self.exit = (ex, t.y)
+                    eco.log(f"a tarantula hawk wasp stung {t.name} the {common_name(t.sp['name'])} "
+                            "and is dragging it away", "kill")
+                else:
+                    t.plant_all()
+                    t._start_flee(self.x, self.y)
+                    self.state, self.target, self.timer = "leave", None, 0
+                    eco.log(f"{t.name} the {common_name(t.sp['name'])} fought off a tarantula hawk "
+                            "wasp", "kill")
+        elif st == "drag":                     # walks backwards, hauling the paralysed spider
+            if t is None or t.gone or t.interaction is not None:
+                if t is not None and t.state == "paralyzed":
+                    t.paralyzed_until = time.monotonic() + 60
+                self.state = "leave"
+                return
+            ex, ey = self.exit
+            a = math.atan2(ey - self.y, ex - self.x)
+            self.angle = a + math.pi
+            pull = 1.4 if (self.phase // 12) % 2 else 0.4
+            self.x += math.cos(a) * pull
+            self.y += math.sin(a) * pull
+            t.x = self.x - math.cos(a) * (self.s * 1.2 + t.s * 0.8)
+            t.y = self.y - math.sin(a) * (self.s * 1.2 + t.s * 0.8)
+            t.angle = a + math.pi
+            if not (-60 < self.x < self.sw + 60):
+                t.gone = True
+                self.gone = True
+                eco.stats["kills"] += 1
+        else:                                  # leave
+            self.z = min(40.0, self.z + 1)
+            self._fly_to(self.x + math.cos(self.angle) * 500, self.y + math.sin(self.angle) * 500, 4.0)
+            if not (-80 < self.x < self.sw + 80 and -80 < self.y < self.sh + 80):
+                self.gone = True
+
+    def _fly_to(self, x, y, v):
+        want = math.atan2(y - self.y, x - self.x)
+        self.angle += _wrap_angle(want - self.angle) * 0.1 + random.gauss(0, 0.12)
+        self.x += math.cos(self.angle) * v
+        self.y += math.sin(self.angle) * v
+        self.z += (28 - self.z) * 0.05
+
+
+def draw_wasp(p, w, shadow):
+    s = w.s
+    if shadow:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, int(70 * max(0.3, 1 - w.z / 60))))
+        p.drawEllipse(QPointF(w.x + w.z * SX, w.y + w.z * SY), s * 1.8, s * 0.6)
+        return
+    p.save()
+    p.translate(w.x, w.y)
+    p.rotate(math.degrees(w.angle))
+    p.scale(1 + w.z * 0.008, 1 + w.z * 0.008)
+    flying = w.z > 6
+    if not flying:                             # six long orange-black legs
+        p.setPen(QPen(QColor("#1a1420"), s * 0.12, Qt.SolidLine, Qt.RoundCap))
+        for side in (-1, 1):
+            for dx, ang in ((0.5, 0.6), (0.1, 1.5), (-0.3, 2.4)):
+                a = side * ang + math.sin(w.phase * 0.6 + dx * 5) * 0.25
+                p.drawLine(QPointF(s * dx, 0), QPointF(s * dx + math.cos(a) * s * 1.4,
+                                                       math.sin(a) * s * 1.4))
+    flick = abs(math.sin(w.phase * (1.4 if flying else 0.3)))
+    p.setPen(QPen(QColor(120, 60, 10, 120), 0.4))
+    p.setBrush(QColor(232, 120, 30, 170 if flying else 220))
+    for side in (-1, 1):                       # bright orange wings
+        spread = (0.4 + 0.8 * flick) if flying else 0.15 + 0.2 * flick
+        p.drawEllipse(QPointF(-s * 0.5, side * s * spread), s * 1.3, s * 0.35)
+    p.setPen(Qt.NoPen)
+    g = QRadialGradient(QPointF(-s * 0.6, -s * 0.2), s * 1.2)
+    g.setColorAt(0, QColor("#4a5a9a"))
+    g.setColorAt(1, QColor("#0e0e1c"))
+    p.setBrush(g)                              # glossy blue-black body: head, thorax, waist, abdomen
+    p.drawEllipse(QPointF(s * 0.9, 0), s * 0.35, s * 0.32)
+    p.drawEllipse(QPointF(s * 0.35, 0), s * 0.45, s * 0.36)
+    p.drawEllipse(QPointF(-0.05 * s, 0), s * 0.12, s * 0.09)
+    p.drawEllipse(QPointF(-s * 0.9, 0), s * 0.8, s * 0.4)
+    p.setBrush(QColor(255, 255, 255, 120))
+    p.drawEllipse(QPointF(-s * 0.85, -s * 0.15), s * 0.35, s * 0.08)
+    p.setPen(QPen(QColor("#e07020"), s * 0.08, Qt.SolidLine, Qt.RoundCap))
+    p.setBrush(Qt.NoBrush)
+    for side in (-1, 1):                       # curled, flicking antennae
+        path = QPainterPath(QPointF(s * 1.15, side * s * 0.1))
+        tw = math.sin(w.phase * 0.3 + side) * 0.3
+        path.quadTo(QPointF(s * 1.8, side * s * (0.5 + tw)), QPointF(s * 2.0, side * s * (0.2 + tw)))
+        p.drawPath(path)
+    p.restore()
+
+
 class Ecology:
 
     def __init__(self, world):
@@ -3443,6 +4174,16 @@ class Ecology:
                       "molts": 0, "ballooned": 0, "webs": 0, "insects": 0, "deaths": 0,
                       "thefts": 0}
         self.insects = WORLD.insects
+        self.flowers = []
+        self.tents = []
+        self.wasps = []
+        self.wasp_clock = random.uniform(400, 900)
+        self.ant_clock = random.uniform(300, 900)
+        self.trails = []
+        self.weather = "clear"
+        self.weather_t = random.uniform(500, 1200)
+        self.wind_target = 0.0
+        self.was_night = None
         self.insect_clock = 0.0
         self.gather_clock = 0.0
 
@@ -3468,6 +4209,7 @@ class Ecology:
         drive = e["cann"] * (1 - e["tol"]) if same else e["ara"]
         score = e["agg"] * fR * (0.3 + drive) * a.hunger * (1 - 0.5 * f["dfn"])
         score *= PREY_MULT.get(b.sp["name"], 1.0)
+        score *= 0.6 + 0.8 * a.bold
         if a.web is not None and a.web.contains(b.x, b.y):
             score *= 1.5
         if b.state in ("molt", "stuck", "feed"):
@@ -3558,8 +4300,10 @@ class Ecology:
                     cands.append((2.2, cx, cy, (ex, ey), (wid, QRectF(rect))))
         cands = [c if len(c) == 5 else c + (None,) for c in cands]
         best = None
+        taken = [(f.x, f.y) for f in self.flowers] + [b.home for b in self.spiders()
+                                                     if b.home is not None and b is not o]
         for score, cx, cy, anchor, win in cands:
-            ok = True
+            ok = all(math.hypot(hx - cx, hy - cy) > r + 40 for hx, hy in taken)
             for w in self.webs:
                 d = math.hypot(w.cx - cx, w.cy - cy)
                 same = w.species == o.sp["name"] and o.eco["tol"] >= 0.5
@@ -3594,6 +4338,11 @@ class Ecology:
         if kind in ("none", "burrow"):
             o.home = (cx, cy)
             o._goto(cx, cy, lambda: o._set("hub", 99999))
+            if o.base_sp["name"] == "crab_spider":     # crab spiders sit on a flower
+                white = QColor(o.sp["abd_col"]).saturation() < 60
+                f = Flower(cx, cy, "daisy" if white else "goldenrod")
+                f.owner = o
+                self.flowers.append(f)
             return
         old = next((w for w in self.webs if w.owner is None and w.kind == kind
                     and math.hypot(w.cx - cx, w.cy - cy) < 20), None)
@@ -3641,6 +4390,17 @@ class Ecology:
         for fn in due:
             fn()
 
+        for m in live:                          # wolf broods dismount after riding a while
+            brood = getattr(m, "brood", None)
+            if brood and now > brood[2]:
+                m.brood = None
+                self._set_brood(m, False)
+                self._spawn_young(m, brood[1], brood[0], m.x, m.y, now)
+                self.log(f"{m.name}'s spiderlings scattered from her back", "hatch")
+        self._weather(live, now, dt)
+        self._ants(live, dt)
+        self._seasonal_webs(live)
+        self._wasp(live, now, dt)
         self._insects(live, now, dt)
         self._cursor(live, now, dt)
         self._klepto(live, now)
@@ -3683,8 +4443,14 @@ class Ecology:
         if w is not None:
             if w.owner is not o:
                 o.web = None
+            elif o.state == "build" and w.eat:  # rolling up and eating the old capture spiral
+                w.cache = None
+                w.progress = max(0.45, w.progress - dt / 16)
+                if w.progress <= 0.45:
+                    w.eat = False
             elif o.state == "build":
                 fresh = w.progress < 1.0
+                w.cache = None if fresh else w.cache
                 w.progress = min(1.0, w.progress + dt / random.uniform(55, 75))
                 w.integrity = min(1.0, w.integrity + dt / 60)
                 if fresh and w.progress >= 1.0:
@@ -3731,7 +4497,7 @@ class Ecology:
             kin = sum(1 for b in self.spiders() if b.base_sp is o.base_sp
                       and b.state not in DEADISH and b.state != "ball" and b is not o)
             social = o.base_sp["name"] == "social_spider"
-            p_bal = 0.8 if WORLD.season == "autumn" else 0.55
+            p_bal = (0.8 if WORLD.season == "autumn" else 0.55) + 0.2 * abs(WORLD.wind)
             if social and o.colony is not None and len(o.colony["members"]) < SOCIAL_CAP:
                 self._join_colony(o, o.colony)
             elif kin >= MAX_PER_SPECIES or random.random() < p_bal:
@@ -3832,9 +4598,12 @@ class Ecology:
                      f"{'female' if o.sex == 'f' else 'male'}", "molt")
         new.immune_until = 0
         new.settle_at = time.monotonic() + 20
-        new.soft_until = time.monotonic() + 60
-        new.plant_all()
-        new._start_pause(60, 120)
+        now_ = time.monotonic()
+        new.soft_until = now_ + 150
+        new.x, new.y = o.x, o.y
+        new.emerge = (o.x, o.y, o.x + math.cos(o.angle) * o.s * 1.4,
+                      o.y + math.sin(o.angle) * o.s * 1.4, now_, now_ + 8)
+        new.state = "emerge"
         lst = self.world.butterflies
         lst[lst.index(o)] = skin
         lst.append(new)
@@ -3862,6 +4631,20 @@ class Ecology:
     def _sacs(self, now):
         for sac in self.sacs:
             m = sac.mother
+            if (sac.carried and m.sp["name"] == "nursery_web" and sac.tent is None
+                    and now > sac.hatch_at - 90 and m.state in FREE):
+                # she spins a nursery tent, hangs the sac inside, and stands guard
+                t = Tent(m.x, m.y, max(18.0, m.R * 0.9))
+                self.tents.append(t)
+                sac.tent = t
+                sac.carried = False
+                m.carry_sac = False
+                sac.x, sac.y = m.x, m.y
+                m.home = (m.x + math.cos(m.angle) * t.r * 1.2, m.y + math.sin(m.angle) * t.r * 1.2)
+                m._goto(*m.home, lambda m=m: m._set("guard", int(60 * 140)))
+                t.until = sac.hatch_at + 120
+                self.log(f"{m.name} the Nursery Web Spider spun a silk nursery tent "
+                         "and is guarding it", "egg")
             if sac.carried:
                 if m.gone or m.state in DEADISH:
                     sac.carried = False       # dropped when the mother dies
@@ -3872,6 +4655,19 @@ class Ecology:
                 sac.gone = True
                 self._hatch(sac, now)
         self.sacs = [s for s in self.sacs if not s.gone]
+        self.tents = [t for t in self.tents if t.until is None or now < t.until]
+
+    def _set_brood(self, m, on):
+        m.sp["variant"] = "babies" if on else None
+        m.variant = m.sp["variant"]
+        m.art, m.shadow_path = build_body(m.sp, m.s)
+        ax, arx, ary = m.sp["abd"]
+        m.babies = []                          # a few restless ones shuffle about live
+        while on and len(m.babies) < 6:
+            bx, by = random.uniform(-1, 1), random.uniform(-1, 1)
+            if bx * bx + by * by < 0.9:
+                m.babies.append((ax + bx * arx, by * ary, random.uniform(0.06, 0.09),
+                                 random.choice(["#b8a488", "#a08c70", "#c8b898"])))
 
     def _hatch(self, sac, now):
         m = sac.mother
@@ -3883,8 +4679,17 @@ class Ecology:
         n = max(0, min(random.randint(8, 14), MAX_JUV - juv))
         self.stats["hatched"] += n
         m.children += n
+        if n and sac.carried and m.sp["name"] == "wolf_spider" and m.state not in DEADISH:
+            self._set_brood(m, True)            # the young climb onto her back and ride along
+            m.brood = (n, sac.base, now + random.uniform(120, 200))
+            self.log(f"{n} spiderlings hatched and climbed onto {m.name}'s back", "hatch")
+            return
         if n:
             self.log(f"{n} spiderlings hatched from {m.name}'s egg sac", "hatch")
+        self._spawn_young(m, sac.base, n, sac.x, sac.y, now)
+
+    def _spawn_young(self, m, base, n, x, y, now):
+        sac = type("Sac", (), {"x": x, "y": y, "base": base})
         for _ in range(n):
             o = Spider(sac.base, m.sw, m.sh, scale=0.32)
             o.x = sac.x + random.uniform(-8, 8)
@@ -3968,6 +4773,7 @@ class Ecology:
                 o.plant_all()
             winner._start_pause(60, 160)
             loser._start_flee(winner.x, winner.y)
+            loser.fear.append((loser.x, loser.y, time.monotonic()))
             return
         if random.random() < f.p:
             self._kill(a, b, f.kind)
@@ -3975,6 +4781,7 @@ class Ecology:
             for o in (a, b):
                 o.plant_all()
             b._start_flee(a.x, a.y)
+            b.fear.append((b.x, b.y, time.monotonic()))
             a._start_pause(60, 160)
         else:                                 # counter-attack
             self.fights.append(Fight(b, a, "kill", self._p_success(b, a), random.uniform(1.5, 3)))
@@ -4057,13 +4864,15 @@ class Ecology:
         sw, sh = getattr(self.world, "sw", 1920), getattr(self.world, "sh", 1080)
         # supply depends on the season and the time of day
         rate = {"spring": 2.0, "summer": 4.0, "autumn": 2.0, "winter": 0.4}[WORLD.season]
+        rate *= max(0.05, 1 - WORLD.rain)
         self.insect_clock += dt * rate / 60
         if self.insect_clock >= 1 and len(self.insects) < 14:
             self.insect_clock = 0
             night = WORLD.night > 0.5
-            flowers = any(o.base_sp["name"] == "flower_crab" for o in live)
-            kinds = (["moth", "moth", "fruitfly"] if night else
-                     ["fly", "fly", "fruitfly"] + (["bee", "bee"] if flowers else []))
+            flowers = bool(self.flowers) or any(o.base_sp["name"] == "flower_crab" for o in live)
+            kinds = (["moth", "moth", "fruitfly", "mosquito", "mosquito"] if night else
+                     ["fly", "fly", "fruitfly"] + (["bee", "bee"] if flowers else [])
+                     + (["dragonfly"] if random.random() < 0.15 else []))
             self.insects.append(Insect(random.choice(kinds), sw, sh))
         for b in self.insects:
             b.update()
@@ -4074,20 +4883,47 @@ class Ecology:
             for w in self.webs:
                 if (w.progress >= 1 and w.kind != "mat" and w.integrity > 0.3
                         and w.contains(b.x, b.y) and random.random() < 0.03):
+                    if b.kind == "dragonfly" and w.species != "golden_orb":
+                        w.integrity = max(0.0, w.integrity - 0.45)   # smashes straight through
+                        self.log(f"a dragonfly tore through {w.owner.name if w.owner else 'a'}'s web",
+                                 "web")
+                        break
                     b.stuck(random.uniform(25, 45))
                     b.web = w
                     w.integrity = max(0.0, w.integrity - 0.03)
                     self._vibration(w, b)
                     break
         # bees drawn to the flower crab's UV lure
-        lures = [o for o in live if o.base_sp["name"] == "flower_crab" and o.state in ("hub", "pause")]
+        lures = [(o.x, o.y, o) for o in live if o.base_sp["name"] == "flower_crab"
+                 and o.state in ("hub", "pause")]
+        lures += [(f.x, f.y, f.owner if f.owner is not None and f.owner.state in ("hub", "pause")
+                   and math.hypot(f.owner.x - f.x, f.owner.y - f.y) < 40 else None)
+                  for f in self.flowers]
         for b in self.insects:
-            if b.kind == "bee" and b.state == "fly" and lures:
-                o = min(lures, key=lambda o: math.hypot(o.x - b.x, o.y - b.y))
-                b.goal = (o.x, o.y)
-                if math.hypot(o.x - b.x, o.y - b.y) < o.R * 0.6 + 4 and o.prey is None:
-                    o._special("strike", "pause")
-                    self._capture(o, b, f"{o.name} the Flower Crab lured in a bee and caught it")
+            if b.kind == "bee" and b.state == "fly" and lures and b.life > 0:
+                lx, ly, o = min(lures, key=lambda t: math.hypot(t[0] - b.x, t[1] - b.y))
+                b.goal = (lx, ly)
+                if math.hypot(lx - b.x, ly - b.y) < 10:
+                    if o is not None and o.prey is None:
+                        o._special("strike", "pause")
+                        self._capture(o, b, f"{o.name} the {common_name(o.sp['name'])} ambushed a bee "
+                                            "on its flower")
+                    else:                     # a quiet visit: sip, then move on
+                        b.state, b.timer = "land", random.randint(150, 320)
+                        b.life = min(b.life, 60 * 20)
+        for o in live:                        # trapdoor: something touched a trip-line
+            if o.state == "burrow" and o.lunge == 0 and o.cool <= 0:
+                bx, by = o.burrow
+                for b in self.insects:
+                    if b.state == "land" and math.hypot(b.x - bx, b.y - by) < o.s * 4:
+                        o.lid_angle = math.atan2(b.y - by, b.x - bx)
+                        o.lunge = 16
+                        b.state, b.gone = "caught", True
+                        o.hunger = max(0.0, o.hunger - 0.4)
+                        self.stats["insects"] += 1
+                        self.log(f"{o.name} the Trapdoor Spider burst out and dragged a {b.kind} "
+                                 "into its burrow", "insect")
+                        break
         for o in live:
             if o.state != "special" or o.prey is not None:
                 continue
@@ -4124,6 +4960,116 @@ class Ecology:
                 o.target = None
         self.insects[:] = [b for b in self.insects if not b.gone]
 
+    def _seasonal_webs(self, live):
+        """Orb weavers eat their old web and spin a fresh one at the start of their day."""
+        night = WORLD.night > 0.5
+        if self.was_night is None or night == self.was_night:
+            self.was_night = night
+            return
+        self.was_night = night
+        renewing = 0
+        for w in self.webs:
+            o = w.owner
+            if w.kind != "orb" or o is None or o.state != "hub" or w.progress < 1:
+                continue
+            nocturnal = ACTIVE_TIME.get(o.base_sp["name"], "N") == "N"
+            if (night and nocturnal) or (not night and not nocturnal):
+                w.eat = True
+                o._set("build", 99999)
+                renewing += 1
+        if renewing:
+            self.log(f"{renewing} orb weaver{'s' if renewing > 1 else ''} rolled up and ate "
+                     "the old web to spin a fresh one", "web")
+
+    def _weather(self, live, now, dt):
+        self.weather_t -= dt
+        if self.weather_t <= 0:
+            if self.weather == "clear":
+                wet = {"spring": 0.6, "summer": 0.45, "autumn": 0.65, "winter": 0.3}[WORLD.season]
+                self.weather = "rain" if random.random() < wet else "wind"
+                self.weather_t = random.uniform(100, 220) if self.weather == "rain" else random.uniform(60, 180)
+                if self.weather == "rain":
+                    self.log("Rain! Spiders take cover and the insects vanish", "season")
+                    for b in self.insects:
+                        b.life = 0
+                    for o in live:
+                        if (o.state in ("walk", "pause", "turn") and o.home is None
+                                and o.web is None and random.random() < 0.6):
+                            self._hide(o, random.uniform(60, 160))
+                else:
+                    self.wind_target = random.choice((-1, 1)) * random.uniform(0.5, 1.0)
+                    self.log("A wind picks up — the webs billow", "season")
+            else:
+                if self.weather == "rain":
+                    for w in self.webs:
+                        w.wet = 1.0
+                    self.log("The rain stops; every web glitters with droplets", "season")
+                self.weather = "clear"
+                self.wind_target = 0.0
+                self.weather_t = random.uniform(900, 2100)
+        WORLD.rain += ((1.0 if self.weather == "rain" else 0.0) - WORLD.rain) * min(1.0, dt * 0.5)
+        gust = self.wind_target * (0.7 + 0.3 * math.sin(now * 0.9)) if self.weather == "wind" else 0.0
+        WORLD.wind += (gust - WORLD.wind) * min(1.0, dt * 0.8)
+        for w in self.webs:
+            w.wet = max(0.0, w.wet - dt / 480)
+            w.tremble = False
+        for b in self.insects:
+            if b.state == "stuck" and b.web is not None:
+                b.web.tremble = True
+
+    def _ants(self, live, dt):
+        if WORLD.night < 0.5 and WORLD.season != "winter" and WORLD.rain < 0.2:
+            self.ant_clock -= dt
+        if self.ant_clock <= 0 and not self.trails:
+            self.ant_clock = random.uniform(700, 1500)
+            self.trails.append(AntTrail(getattr(self.world, "sw", 1920), getattr(self.world, "sh", 1080)))
+            self.log("A trail of ants is marching through", "insect")
+        for t in self.trails:
+            t.update()
+            if t.clock % 15:
+                continue
+            pos = t.positions()[::3]
+            for o in live:
+                if o.state not in ("walk", "pause", "turn", "watch") or o.cool > 0:
+                    continue
+                near = [q for q in pos if math.hypot(q[0] - o.x, q[1] - o.y) < 70 + o.R * 0.4]
+                if not near:
+                    continue
+                o.cool = 120
+                if o.base_sp["name"] == "ant_mimic":   # walks along with them, safe in disguise
+                    x, y, ang, _ = near[0]
+                    o.angle = ang
+                    o._goto(x + math.cos(ang) * 60, y + math.sin(ang) * 60, o._start_walk)
+                else:                          # ants are fierce: everyone else gives way
+                    o._start_flee(near[0][0], near[0][1], 40)
+        self.trails = [t for t in self.trails if not t.gone]
+
+    def _wasp(self, live, now, dt):
+        """Every so often (in daylight) a tarantula hawk comes hunting."""
+        if WORLD.night < 0.4 and WORLD.season != "winter":
+            self.wasp_clock -= dt * (2 if WORLD.season == "summer" else 1)
+        if self.wasp_clock <= 0 and not self.wasps:
+            self.wasp_clock = random.uniform(600, 1200)
+            self.wasps.append(SpiderWasp(getattr(self.world, "sw", 1920),
+                                         getattr(self.world, "sh", 1080)))
+            self.log("a tarantula hawk wasp is hunting in the box!", "kill")
+        for w in self.wasps:
+            w.update(self, live)
+            if w.state in ("search", "hunt") and w.phase % 20 == 0:
+                for o in live:                 # spiders react to the danger
+                    if (o.state in FREE and o is not w.target and o.cool <= 0
+                            and math.hypot(o.x - w.x, o.y - w.y) < 260):
+                        o.cool = 200
+                        name = o.base_sp["name"]
+                        if name == "golden_wheel":
+                            o._start_roll(math.atan2(o.y - w.y, o.x - w.x))
+                        elif o.sp["threat"] in ("hairflick", "hiss", "threat"):
+                            o.danger = (w.x, w.y)
+                            o._special("threat", "flee")
+                        elif o.web is None:
+                            o._start_flee(w.x, w.y)
+        self.wasps = [w for w in self.wasps if not w.gone]
+
     def _vibration(self, w, b):
         """Prey thrashing in a web: the owner (or the whole colony) runs to it."""
         col = getattr(w, "colony", None)
@@ -4148,6 +5094,19 @@ class Ecology:
         o.state = "feed"
         o.plant_all()
         o.eco_until = time.monotonic() + random.uniform(18, 35)
+        if (o.base_sp["name"] == "nursery_web" and o.sex == "m" and o.scale >= 1
+                and getattr(o, "gift", None) is None):
+            mates = [f for f in self.spiders() if f.base_sp is o.base_sp and f.sex == "f"
+                     and f.scale >= 1 and f.state not in DEADISH and not f.gravid_at]
+            if mates:                          # don't eat it: wrap it as a wedding gift
+                b.wrap = 1.0
+                o.gift = b
+                o.state = "seek"
+                o.target = min(mates, key=lambda f: math.hypot(f.x - o.x, f.y - o.y))
+                o.timer = o.timer_total = 60 * 60
+                self.log(f"{o.name} the Nursery Web Spider wrapped a {b.kind} in silk as a "
+                         "wedding gift", "mate")
+                return
         o.hunger = max(0.0, o.hunger - 0.35)
         o.meals += 1
         self.stats["insects"] += 1
@@ -4296,7 +5255,8 @@ class Ecology:
             if m.state == "court":
                 m._start_pause()
             return
-        if random.random() < f.eco["cann"] * f.hunger * 0.5:   # she attacks instead
+        gift = getattr(m, "gift", None)
+        if gift is None and random.random() < f.eco["cann"] * f.hunger * 0.5:   # she attacks
             self.fights.append(Fight(f, m, "sexual", 0.85, random.uniform(1.5, 3)))
             return
         # mating: male mounts at her front, palps twitching
@@ -4321,6 +5281,16 @@ class Ecology:
         m.plant_all()
         f.gravid_at = time.monotonic() + random.uniform(240, 420)
         m.mated_until = time.monotonic() + 300
+        gift = getattr(m, "gift", None)
+        if gift is not None and not gift.gone:  # she takes the gift and feeds on it
+            m.gift = None
+            m.prey = None
+            f.prey = gift
+            f.state = "feed"
+            f.eco_until = time.monotonic() + random.uniform(25, 40)
+            m._start_flee(f.x, f.y)
+            self.log(f"{f.name} accepted {m.name}'s gift — he gets away safely", "mate")
+            return
         p = f.eco["scann"] + 0.2 * f.hunger
         if random.random() < p:               # sexual cannibalism
             self.fights.append(Fight(f, m, "sexual", 0.9, random.uniform(1, 2)))
@@ -4330,6 +5300,10 @@ class Ecology:
 
 
 def draw_eco_ground(p, eco):
+    for f in eco.flowers:
+        f.draw(p)
+    for t in eco.tents:
+        t.draw(p)
     for w in eco.webs:
         w.draw(p)
     for s in eco.sacs:

@@ -23,10 +23,15 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF
 from PyQt5.QtGui import (QPainter, QColor, QPen, QCursor, QRegion, QFont, QPainterPath,
-                         QPixmap, QIcon)
+                         QPixmap, QIcon, QPolygonF, QRadialGradient, QImage)
 from PyQt5.QtNetwork import QLocalServer
 
 import arachne
+import dex
+import struct
+import zlib
+import tempfile
+from PyQt5.QtCore import QBuffer, QByteArray, QIODevice
 
 import papillon
 import spiders as S
@@ -54,6 +59,114 @@ ICONS = {"kill": "✗", "cannibal": "✗", "mate": "♥", "egg": "●", "hatch":
          "arrive": "→", "season": "☀", "night": "☾", "info": "·"}
 
 
+SETTINGS_FILE = os.path.join(SAVE_DIR, "settings.json")
+SETTINGS = {"clock": "compressed", "seasons": "compressed", "sound": False, "favourites": [],
+            "dex_species": {}, "dex_behaviours": {}}
+try:
+    with open(SETTINGS_FILE) as _f:
+        SETTINGS.update(json.load(_f))
+except (OSError, ValueError):
+    pass
+
+
+def save_settings():
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(SETTINGS, f)
+    except OSError:
+        pass
+
+
+def _png_bytes(img):
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(buf.data())
+
+
+def _chunks(png):
+    i, out = 8, []
+    while i < len(png):
+        n = struct.unpack(">I", png[i:i + 4])[0]
+        out.append((png[i + 4:i + 8], png[i + 8:i + 8 + n]))
+        i += 12 + n
+    return out
+
+
+def write_apng(path, frames, fps):
+    """Animated PNG from QImages — plays in any browser, needs no ffmpeg."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    first = _chunks(_png_bytes(frames[0]))
+    ihdr = next(d for k, d in first if k == b"IHDR")
+    w, h = struct.unpack(">II", ihdr[:8])
+    out = [b"\x89PNG\r\n\x1a\n", chunk(b"IHDR", ihdr),
+           chunk(b"acTL", struct.pack(">II", len(frames), 0))]
+    seq = 0
+    for n, img in enumerate(frames):
+        out.append(chunk(b"fcTL", struct.pack(">IIIIIHHBB", seq, w, h, 0, 0, 1, fps, 0, 0)))
+        seq += 1
+        for kind, data in _chunks(_png_bytes(img)):
+            if kind != b"IDAT":
+                continue
+            if n == 0:
+                out.append(chunk(b"IDAT", data))
+            else:
+                out.append(chunk(b"fdAT", struct.pack(">I", seq) + data))
+                seq += 1
+    out.append(chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(b"".join(out))
+
+
+def pictures_dir():
+    d = os.path.join(os.path.expanduser("~"), "Pictures", "Arachne")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# ── synthesized sounds (no audio files shipped) ──
+
+def _wav(path, samples, rate=22050):
+    data = b"".join(struct.pack("<h", int(max(-1, min(1, s)) * 30000)) for s in samples)
+    with open(path, "wb") as f:
+        f.write(b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " +
+                struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) +
+                b"data" + struct.pack("<I", len(data)) + data)
+
+
+def make_sounds():
+    d = os.path.join(SAVE_DIR, "sounds")
+    os.makedirs(d, exist_ok=True)
+    rng = random.Random(7)
+    r = 22050
+    specs = {
+        "hiss": [rng.uniform(-1, 1) * 0.5 * math.sin(math.pi * i / (r * 0.7)) for i in range(int(r * 0.7))],
+        "buzz": [0.25 * (((i * 210 / r) % 1) * 2 - 1) * (0.6 + 0.4 * math.sin(i / r * 40))
+                 * math.sin(math.pi * i / (r * 0.6)) for i in range(int(r * 0.6))],
+        "tick": [math.exp(-i / 90) * math.sin(i * 0.9) * 0.8 for i in range(int(r * 0.05))],
+        "rain": [rng.uniform(-1, 1) * 0.18 * (0.7 + 0.3 * math.sin(i / r * 3)) for i in range(r * 2)],
+    }
+    out = {}
+    for name, s in specs.items():
+        p = os.path.join(d, name + ".wav")
+        if not os.path.exists(p):
+            _wav(p, s, r)
+        out[name] = p
+    return out
+
+
+def _southern():
+    try:
+        zone = os.path.realpath("/etc/localtime")
+    except OSError:
+        zone = ""
+    zone = os.environ.get("TZ", zone)
+    return any(k in zone for k in ("Australia/", "Pacific/Auckland", "America/Argentina",
+                                    "America/Santiago", "America/Sao_Paulo", "America/Montevideo",
+                                    "Africa/Johannesburg", "Africa/Maputo", "Antarctica/"))
+
+
 class Clock:
     """Colony time: survives restarts through the save file."""
 
@@ -67,7 +180,7 @@ class Clock:
         self.last = now
 
     def phase(self):                          # 0 = midnight, 0.5 = noon
-        if DAY_MINUTES:
+        if DAY_MINUTES and SETTINGS["clock"] != "real":
             return (self.age / (DAY_MINUTES * 60) + 0.3) % 1.0
         t = time.localtime()
         return (t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec) / 86400
@@ -80,6 +193,13 @@ class Clock:
         return int(self.age / (DAY_MINUTES * 60)) + 1 if DAY_MINUTES else 1
 
     def season(self):
+        if SETTINGS["seasons"] == "real":         # from the calendar (and hemisphere)
+            m = time.localtime().tm_mon
+            s = ("winter", "winter", "spring", "spring", "spring", "summer", "summer", "summer",
+                 "autumn", "autumn", "autumn", "winter")[m - 1]
+            if _southern():
+                s = {"winter": "summer", "summer": "winter", "spring": "autumn", "autumn": "spring"}[s]
+            return s
         return SEASONS[int(self.age / (SEASON_MINUTES * 60)) % 4]
 
     def year(self):
@@ -169,7 +289,7 @@ class PopulationGraph(QWidget):
 
 
 class JournalWindow(QWidget):
-    COLS = ("Name", "Species", "Sex", "Stage", "Age (days)", "Kills", "Young", "Gen", "Doing")
+    COLS = ("★", "Name", "Species", "Sex", "Stage", "Age (days)", "Kills", "Young", "Gen", "Doing")
 
     def __init__(self, colony):
         super().__init__(None, Qt.Window)
@@ -198,7 +318,12 @@ class JournalWindow(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.itemChanged.connect(self._renamed)
         self.table.itemSelectionChanged.connect(self._picked)
+        self.table.cellClicked.connect(self._star)
         tabs.addTab(self.table, "Spiders")
+        self.dex = QTreeWidget()
+        self.dex.setHeaderLabels(["Spider-dex", "Rarity", "Seen"])
+        self.dex.setWordWrap(True)
+        tabs.addTab(self.dex, "Spider-dex")
         for e in colony.journal.entries:
             self._append(e)
         colony.journal.listeners.append(self._append)
@@ -223,6 +348,7 @@ class JournalWindow(QWidget):
         if self.table.state() != QAbstractItemView.EditingState:
             self._fill_table(live)
         self._fill_tree()
+        self._fill_dex()
 
     def _fill_table(self, live):
         self._filling = True
@@ -230,13 +356,14 @@ class JournalWindow(QWidget):
         for r, o in enumerate(sorted(live, key=lambda o: (o.base_sp["name"], o.name))):
             stage = ("old" if o.old() else "adult" if o.scale >= 1 else
                      "juvenile" if o.scale > 0.5 else "spiderling")
-            vals = (o.name, common_name(o.base_sp["name"]), "♀" if o.sex == "f" else "♂", stage,
+            vals = ("★" if o.uid in self.colony.favs else "☆", o.name, common_name(o.base_sp["name"]),
+                    "♀" if o.sex == "f" else "♂", stage,
                     f"{o.age_s / (DAY_MINUTES * 60 or 86400):.1f}", o.kills, o.children, o.gen,
                     doing(o))
             for col, v in enumerate(vals):
                 it = QTableWidgetItem(str(v))
                 it.setData(Qt.UserRole, o.uid)
-                if col:
+                if col != 1:
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(r, col, it)
         self._filling = False
@@ -255,7 +382,7 @@ class JournalWindow(QWidget):
         self.tree.expandToDepth(1)
 
     def _renamed(self, item):
-        if self._filling or item.column() != 0:
+        if self._filling or item.column() != 1:
             return
         o = self.colony.by_uid(item.data(Qt.UserRole))
         if o and item.text().strip():
@@ -265,7 +392,43 @@ class JournalWindow(QWidget):
     def _picked(self):
         rows = self.table.selectedItems()
         if rows:
-            self.colony.selected = rows[0].data(Qt.UserRole)
+            uid = rows[0].data(Qt.UserRole)
+            self.colony.selected = uid
+            if rows[0].column() == 0 or any(r.column() == 0 for r in rows[:1]):
+                pass
+
+    def _star(self, row, col):
+        if col != 0:
+            return
+        uid = self.table.item(row, 0).data(Qt.UserRole)
+        favs = self.colony.favs
+        favs.symmetric_difference_update({uid})
+        self.refresh()
+
+    def _fill_dex(self):
+        seen_sp = SETTINGS["dex_species"]
+        seen_b = SETTINGS["dex_behaviours"]
+        self.dex.clear()
+        tiers = ("Common", "Uncommon", "Rare", "Ultra-rare")
+        n_sp = sum(1 for sp in SPECIES if sp["name"] in seen_sp)
+        n_b = sum(1 for b in dex.BEHAVIOURS if b[0] in seen_b)
+        top = QTreeWidgetItem([f"Species  ({n_sp}/{len(SPECIES)})", "", ""])
+        self.dex.addTopLevelItem(top)
+        for sp in sorted(SPECIES, key=lambda s: (s["rarity"], s["name"])):
+            got = sp["name"] in seen_sp
+            it = QTreeWidgetItem([common_name(sp["name"]) if got else "? ? ?",
+                                  tiers[sp["rarity"]], "✓ " + seen_sp[sp["name"]] if got else ""])
+            if got:
+                fact = QTreeWidgetItem([dex.FACTS.get(sp["name"], ""), "", ""])
+                it.addChild(fact)
+            top.addChild(it)
+        btop = QTreeWidgetItem([f"Behaviours witnessed  ({n_b}/{len(dex.BEHAVIOURS)})", "", ""])
+        self.dex.addTopLevelItem(btop)
+        for bid, label, _ in dex.BEHAVIOURS:
+            btop.addChild(QTreeWidgetItem([label if bid in seen_b else "? ? ?", "",
+                                           "✓ " + seen_b[bid] if bid in seen_b else ""]))
+        top.setExpanded(True)
+        btop.setExpanded(True)
 
 
 def doing(o):
@@ -336,6 +499,12 @@ class ColonyOverlay(S.SpiderOverlay):
         WORLD.year_s = SEASON_MINUTES * 60 * 4
         self.history = []
         self.registry = {}
+        self.streaks, self.glass = [], []
+        self.favs = set()
+        self.sounds = None
+        self.sfx = {}
+        self.clip = None
+        self.last_states = {}
         self.selected = None
         self.last_season = None
         self.last_night = None
@@ -344,15 +513,136 @@ class ColonyOverlay(S.SpiderOverlay):
         super().__init__()
         self.desktop = Desktop(self)
         self.journal_win = None
+        self.journal.listeners.append(self._noticed)
         restored = (not fresh) and self.restore()
         if not restored:
             self.journal.add("A new colony begins: spiders are being released into the box", "info")
-        for t, ms, fn in ((None, AUTOSAVE_S * 1000, self.save), (None, 1000, self.desktop.scan),
+        S.WORLD.ambient_full = None
+        self._sample_screen()
+        for t, ms, fn in ((None, 3000, self._sample_screen),
+                          (None, AUTOSAVE_S * 1000, self.save), (None, 1000, self.desktop.scan),
                           (None, 30000, self._sample)):
             tm = QTimer(self)
             tm.timeout.connect(fn)
             tm.start(ms)
         self._sample()
+
+    # ── discoveries, favourites ──
+
+    def _toast(self, title, text):
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            tray.showMessage(title, text, QIcon(make_icon(64)), 6000)
+
+    def _noticed(self, e):
+        stamp, text, kind = e
+        for bid, label, words in dex.BEHAVIOURS:
+            if bid not in SETTINGS["dex_behaviours"] and any(w in text for w in words):
+                SETTINGS["dex_behaviours"][bid] = self.clock.label()
+                save_settings()
+                self._toast("Spider-dex: new behaviour!", f"{label} — {text}")
+        for o in self.living():                   # favourites: tell me when something happens
+            if o.uid in self.favs and o.name in text:
+                self._toast(f"★ {o.name}", text)
+                break
+
+    def _discover(self):
+        for o in self.living():
+            name = o.base_sp["name"]
+            if name not in SETTINGS["dex_species"]:
+                SETTINGS["dex_species"][name] = self.clock.label()
+                save_settings()
+                self._toast("Spider-dex: new species!",
+                            f"{common_name(name)} — {dex.FACTS.get(name, '')}")
+
+    def feed(self):
+        """Drop a fly at the cursor."""
+        b = S.Insect("fly", self.sw, self.sh)
+        b.x, b.y = self.mouse_x + random.uniform(-15, 15), self.mouse_y + random.uniform(-15, 15)
+        b.z, b.state, b.timer = 18.0, "land", random.randint(300, 600)
+        S.WORLD.insects.append(b)
+        self.journal.add("you dropped a fly into the box", "insect")
+
+    def _frame_image(self):
+        """The colony composited over the desktop (or a dark backdrop if it can't be seen)."""
+        img = QImage(self.width(), self.height(), QImage.Format_ARGB32_Premultiplied)
+        bg = S.WORLD.ambient_full
+        if bg is not None:
+            p = QPainter(img)
+            p.drawImage(self.rect(), bg)
+            p.end()
+        else:
+            img.fill(QColor("#2b2f36"))
+        self.render(img)
+        return img
+
+    def photo(self):
+        path = os.path.join(pictures_dir(), time.strftime("arachne-%Y%m%d-%H%M%S.png"))
+        self._frame_image().save(path)
+        self.journal.add(f"photo saved: {path}", "info")
+        self._toast("Photo saved", path)
+
+    def record_clip(self, secs=10, fps=12):
+        if self.clip is not None:
+            return
+        self.clip = []
+        self._toast("Recording", f"{secs}-second clip…")
+
+        def grab():
+            img = self._frame_image().scaled(self.width() // 2, self.height() // 2,
+                                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.clip.append(img)
+            if len(self.clip) >= secs * fps:
+                t.stop()
+                path = os.path.join(pictures_dir(), time.strftime("arachne-%Y%m%d-%H%M%S.apng"))
+                write_apng(path, self.clip, fps)
+                self.clip = None
+                self.journal.add(f"clip saved: {path}", "info")
+                self._toast("Clip saved", path + "  (open it in a web browser)")
+        t = QTimer(self)
+        t.timeout.connect(grab)
+        t.start(int(1000 / fps))
+        self._clip_timer = t
+
+    def _sound(self):
+        if not SETTINGS["sound"]:
+            if self.sfx.get("rain") is not None and self.sfx["rain"].isPlaying():
+                self.sfx["rain"].stop()
+            return
+        if self.sounds is None:
+            try:
+                from PyQt5.QtMultimedia import QSoundEffect
+                from PyQt5.QtCore import QUrl
+                self.sounds = make_sounds()
+                for k, path in self.sounds.items():
+                    e = QSoundEffect(self)
+                    e.setSource(QUrl.fromLocalFile(path))
+                    e.setVolume(0.35)
+                    self.sfx[k] = e
+                self.sfx["rain"].setLoopCount(-2)       # QSoundEffect.Infinite
+            except Exception:
+                SETTINGS["sound"] = False
+                return
+        rain = self.sfx.get("rain")
+        if rain is not None:
+            if S.WORLD.rain > 0.2 and not rain.isPlaying():
+                rain.play()
+            elif S.WORLD.rain < 0.1 and rain.isPlaying():
+                rain.stop()
+            rain.setVolume(0.25 * S.WORLD.rain)
+        for o in self.living():
+            prev = self.last_states.get(o.uid)
+            st = (o.state, o.special)
+            if prev != st:
+                if st == ("special", "hiss") or st == ("special", "threat"):
+                    self.sfx["hiss"].play()
+                elif prev and prev[0] == "hop" and o.state != "hop":
+                    self.sfx["tick"].play()
+                self.last_states[o.uid] = st
+        mx, my = self.mouse_x, self.mouse_y
+        if random.random() < 0.004 and any(b.state == "fly" and math.hypot(b.x - mx, b.y - my) < 120
+                                           for b in S.WORLD.insects):
+            self.sfx["buzz"].play()
 
     # ── helpers ──
 
@@ -362,6 +652,29 @@ class ColonyOverlay(S.SpiderOverlay):
 
     def by_uid(self, uid):
         return next((o for o in self.living() if o.uid == uid), None)
+
+    def _sample_screen(self):
+        """What's behind us, for light & shadow colour. Wayland returns black: then stay off."""
+        if getattr(self, "_no_screen", False):
+            return
+        try:
+            scr = QApplication.primaryScreen()
+            shot = scr.grabWindow(0).toImage() if scr is not None else QImage()
+            if shot.isNull():
+                self._no_screen = True
+                return
+            small = shot.scaled(64, 36, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            lum = sum(QColor(small.pixel(x, y)).lightness() for x in range(0, 64, 8)
+                      for y in range(0, 36, 6))
+            if shot.isNull() or lum == 0:
+                self._no_screen = True
+                S.WORLD.ambient = S.WORLD.ambient_full = None
+                return
+            S.WORLD.ambient = small
+            S.WORLD.ambient_size = (self.sw, self.sh)
+            S.WORLD.ambient_full = shot
+        except Exception:
+            self._no_screen = True
 
     def _sample(self):
         counts = {}
@@ -454,6 +767,9 @@ class ColonyOverlay(S.SpiderOverlay):
                 b.update(mx, my)
         self.eco.step()
         self._track()
+        if self.physics_steps % 30 == 0:
+            self._discover()
+            self._sound()
         self.update()
         self._update_input_region()
 
@@ -558,6 +874,24 @@ class ColonyOverlay(S.SpiderOverlay):
         self.tray.setToolTip("Arachne — spider colony")
         menu = QMenu()
         menu.addAction("Colony Journal", self.toggle_journal)
+        menu.addAction("Drop a fly  (Ctrl+Shift+F)", self.feed)
+        menu.addAction("Take a photo", self.photo)
+        menu.addAction("Record a 10-second clip", self.record_clip)
+        snd = menu.addAction("Sound")
+        snd.setCheckable(True)
+        snd.setChecked(SETTINGS["sound"])
+        snd.toggled.connect(lambda on: (SETTINGS.update(sound=on), save_settings()))
+        menu.addSeparator()
+        real_clock = menu.addAction("Day/night follows my clock")
+        real_clock.setCheckable(True)
+        real_clock.setChecked(SETTINGS["clock"] == "real")
+        real_clock.toggled.connect(lambda on: (SETTINGS.update(clock="real" if on else "compressed"),
+                                                save_settings()))
+        real_seasons = menu.addAction("Seasons follow the calendar")
+        real_seasons.setCheckable(True)
+        real_seasons.setChecked(SETTINGS["seasons"] == "real")
+        real_seasons.toggled.connect(lambda on: (SETTINGS.update(seasons="real" if on else "compressed"),
+                                                  save_settings()))
         menu.addSeparator()
         menu.addAction("Start a new colony…", self._new_colony)
         menu.addAction("Save && stop  (Ctrl+Shift+B)", self._quit)
@@ -636,17 +970,23 @@ class ColonyOverlay(S.SpiderOverlay):
             S.draw_fx(p, b)
         for b in high:
             S.draw_insect(p, b, False)
+        for w in self.eco.wasps:
+            S.draw_wasp(p, w, True)
+            S.draw_wasp(p, w, False)
+        for t in self.eco.trails:
+            S.draw_ants(p, t, True)
+            S.draw_ants(p, t, False)
+        self._rain(p)
         self._card(p)
         p.end()
 
     def _dew(self, p):
         ph = self.clock.phase()
-        dawn = max(0.0, 1 - abs(ph - 0.27) / 0.06)       # dew only around sunrise
-        if dawn <= 0:
-            return
+        dawn = max(0.0, 1 - abs(ph - 0.27) / 0.06)       # dew around sunrise, drops after rain
         p.setPen(Qt.NoPen)
         for w in self.eco.webs:
-            if w.progress < 1 or w.integrity < 0.4:
+            wet = max(dawn, w.wet)
+            if w.progress < 1 or w.integrity < 0.4 or wet <= 0.02:
                 continue
             if not hasattr(w, "dew"):
                 pts = ([(q.x(), q.y()) for q in w.spiral[::7]] if w.kind == "orb" else
@@ -654,8 +994,60 @@ class ColonyOverlay(S.SpiderOverlay):
                 w.dew = pts
             for k, (x, y) in enumerate(w.dew):
                 tw = 0.6 + 0.4 * math.sin(k * 1.7 + time.monotonic() * 2)
-                p.setBrush(QColor(255, 255, 255, int(200 * dawn * tw * w.integrity)))
-                p.drawEllipse(QPointF(x, y), 1.3, 1.3)
+                rr = 1.3 + 0.6 * w.wet
+                p.setPen(QPen(QColor(60, 70, 90, int(90 * wet * w.integrity)), 0.5))
+                p.setBrush(QColor(255, 255, 255, int(200 * wet * tw * w.integrity)))
+                p.drawEllipse(QPointF(x, y), rr, rr)     # a lens of water: dark rim, bright body
+                p.setPen(Qt.NoPen)
+                if w.wet > 0.3:                   # light caught in each drop
+                    p.setBrush(QColor(255, 255, 255, int(230 * w.wet)))
+                    p.drawEllipse(QPointF(x - 0.5, y - 0.5), 0.5, 0.5)
+
+    def _rain(self, p):
+        r = S.WORLD.rain
+        if r < 0.02 and not self.glass:
+            self.streaks = []
+            return
+        want = int(170 * r)                     # falling streaks
+        while len(self.streaks) < want:
+            self.streaks.append([random.uniform(0, self.sw), random.uniform(-self.sh, 0),
+                                 random.uniform(14, 22), random.uniform(10, 24)])
+        del self.streaks[want:]
+        lean = S.WORLD.wind * 0.35
+        for d in self.streaks:
+            d[1] += d[2]
+            d[0] += d[2] * lean
+            if d[1] > self.sh:
+                d[0], d[1] = random.uniform(0, self.sw), random.uniform(-80, 0)
+        for pen, off in ((QPen(QColor(40, 50, 70, int(45 * r)), 1.4), 1.0),
+                         (QPen(QColor(215, 228, 245, int(110 * r)), 1.0), 0.0)):
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)                       # dark edge reads on white, light on dark
+            for d in self.streaks:
+                p.drawLine(QPointF(d[0] + off, d[1] + off),
+                           QPointF(d[0] - d[3] * lean + off, d[1] - d[3] + off))
+        if r > 0.3 and len(self.glass) < 26 and random.random() < 0.1:
+            self.glass.append([random.uniform(0, self.sw), random.uniform(0, self.sh * 0.6),
+                               random.uniform(2.5, 5), 0.0, []])
+        keep = []
+        for g in self.glass:                    # drops sliding down the screen, leaving trails
+            g[3] = g[3] + 0.02 if random.random() < 0.7 else 0
+            g[1] += g[3] * g[2] * 0.6
+            g[0] += math.sin(g[1] * 0.05) * 0.2
+            g[4].append((g[0], g[1]))
+            del g[4][:-60]
+            if len(g[4]) > 2:
+                p.setPen(QPen(QColor(220, 230, 245, 50), g[2] * 0.5, Qt.SolidLine, Qt.RoundCap))
+                p.drawPolyline(QPolygonF([QPointF(x, y) for x, y in g[4]]))
+            grad = QRadialGradient(QPointF(g[0] - g[2] * 0.3, g[1] - g[2] * 0.3), g[2] * 1.3)
+            grad.setColorAt(0, QColor(255, 255, 255, 170))
+            grad.setColorAt(1, QColor(150, 170, 200, 60))
+            p.setPen(Qt.NoPen)
+            p.setBrush(grad)
+            p.drawEllipse(QPointF(g[0], g[1]), g[2], g[2] * 1.15)
+            if g[1] < self.sh + 10 and (r > 0.05 or random.random() > 0.003):
+                keep.append(g)
+        self.glass = keep
 
     def _card(self, p):
         o = self.by_uid(self.selected) if self.selected else None
@@ -666,7 +1058,8 @@ class ColonyOverlay(S.SpiderOverlay):
         p.drawEllipse(QPointF(o.x, o.y), o.R * 0.8 + 6, o.R * 0.8 + 6)
         stage = ("old" if o.old() else "adult" if o.scale >= 1 else
                  "juvenile" if o.scale > 0.5 else "spiderling")
-        lines = [f"{o.name} {'♀' if o.sex == 'f' else '♂'}  ·  {common_name(o.base_sp['name'])}",
+        lines = [f"{'★ ' if o.uid in self.favs else ''}{o.name} {'♀' if o.sex == 'f' else '♂'}  ·  "
+                 f"{common_name(o.base_sp['name'])}",
                  f"{stage} · {o.age_s / (DAY_MINUTES * 60 or 86400):.1f} days old · gen {o.gen}",
                  f"kills {o.kills} · young {o.children} · meals {o.meals}",
                  f"{doing(o)}" + ("  ·  carrying eggs" if o.gravid_at or o.carry_sac else "")]
@@ -739,6 +1132,7 @@ def snapshot(ov):
     return dict(
         version=1, saved=time.time(), age=ov.clock.age, released=ov.released,
         stats=eco.stats, journal=ov.journal.entries[-400:], history=ov.history[-1500:],
+        favs=sorted(ov.favs),
         registry={str(k): v for k, v in ov.registry.items()}, spiders=spiders, colonies=cols,
         webs=[dict(kind=w.kind, cx=w.cx, cy=w.cy, r=w.r, corner=w.corner, progress=w.progress,
                    integrity=w.integrity, species=w.species) for w in webs],
@@ -762,6 +1156,7 @@ def rebuild(ov, d):
     ov.journal.entries = [tuple(e) for e in d.get("journal", [])]
     ov.history = [(a, c) for a, c in d.get("history", [])]
     ov.registry = {int(k): v for k, v in d.get("registry", {}).items()}
+    ov.favs = set(d.get("favs", []))
     webs = []
     for w in d.get("webs", []):
         web = Web(_Stub(w["species"]), w["kind"], w["cx"], w["cy"], w["r"], tuple(w["corner"]))
@@ -861,6 +1256,12 @@ def main(fresh=None):
             overlay._quit()
         elif cmd == b"journal":
             overlay.toggle_journal()
+        elif cmd == b"feed":
+            overlay.feed()
+        elif cmd == b"photo":
+            overlay.photo()
+        elif cmd == b"clip":
+            overlay.record_clip()
     server.newConnection.connect(on_conn)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *a: overlay._quit())

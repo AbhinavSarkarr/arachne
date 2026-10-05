@@ -10,6 +10,8 @@ After installing you don't need to open anything:
 
 - **Ctrl+Shift+B** — release the spiders (resumes your saved colony)
 - **Ctrl+Shift+B** again — save and put them away
-- Tray icon → **Colony Journal** for the log, population graph and family tree (Linux: also Ctrl+Shift+J)
+- **Ctrl+Shift+F** — drop a fly at your cursor
+- Tray icon → **Colony Journal** (log, population, family tree, ★ favourites, Spider-dex),
+  **photo**, **10-second clip**, **sound**, real clock / real calendar (Linux: also Ctrl+Shift+J)
 
 The colony keeps living between sessions: webs, families, seasons and all.

@@ -8,6 +8,9 @@ Arachne — a living spider colony on your desktop.
   arachne --colony     run the colony itself (used internally)
   arachne --setup      per-user setup: login agent / desktop shortcut (installers call this)
   arachne --unsetup    undo --setup (the saved colony is kept)
+  arachne --feed       drop a fly at the cursor (Ctrl+Shift+F)
+  arachne --photo      save a photo of the colony to ~/Pictures/Arachne
+  arachne --clip       record a 10-second animated PNG clip
 
 Ctrl+Shift+B is owned by the desktop on GNOME (custom shortcut) and by the
 login agent everywhere else (Windows RegisterHotKey, macOS Carbon hot key,
@@ -91,6 +94,7 @@ def toggle(extra=()):
 
 GNOME_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 GNOME_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/arachne/"
+GNOME_FEED = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/arachne-feed/"
 
 
 def _gsettings(*args):
@@ -155,15 +159,16 @@ def setup():
                         f"Exec={_shell(toggle_cmd)}\nIcon=applications-science\nTerminal=false\n"
                         "Categories=Amusement;Simulation;\nStartupNotify=false\n")
         if gnome_available():                 # GNOME owns the key and runs the toggle itself
-            cur = _gsettings("get", GNOME_SCHEMA, "custom-keybindings") or "@as []"
-            if GNOME_PATH not in cur:
-                new = (f"['{GNOME_PATH}']" if cur in ("@as []", "[]")
-                       else cur[:-1] + f", '{GNOME_PATH}']")
-                _gsettings("set", GNOME_SCHEMA, "custom-keybindings", new)
-            key = f"{GNOME_SCHEMA}.custom-keybinding:{GNOME_PATH}"
-            _gsettings("set", key, "name", "Arachne spider colony")
-            _gsettings("set", key, "command", _shell(toggle_cmd))
-            _gsettings("set", key, "binding", "<Control><Shift>b")
+            for path, name, cmd, key_ in ((GNOME_PATH, "Arachne spider colony", toggle_cmd, "b"),
+                                          (GNOME_FEED, "Arachne: drop a fly", launch_cmd("--feed"), "f")):
+                cur = _gsettings("get", GNOME_SCHEMA, "custom-keybindings") or "@as []"
+                if path not in cur:
+                    new = (f"['{path}']" if cur in ("@as []", "[]") else cur[:-1] + f", '{path}']")
+                    _gsettings("set", GNOME_SCHEMA, "custom-keybindings", new)
+                key = f"{GNOME_SCHEMA}.custom-keybinding:{path}"
+                _gsettings("set", key, "name", name)
+                _gsettings("set", key, "command", _shell(cmd))
+                _gsettings("set", key, "binding", f"<Control><Shift>{key_}")
         elif not os.path.exists("/etc/xdg/autostart/arachne-agent.desktop"):
             with open(os.path.join(auto, "arachne-agent.desktop"), "w") as f:
                 f.write("[Desktop Entry]\nType=Application\nName=Arachne hotkey\n"
@@ -196,13 +201,14 @@ def unsetup():
             p = os.path.expanduser(p)
             if os.path.exists(p):
                 os.remove(p)
-        cur = _gsettings("get", GNOME_SCHEMA, "custom-keybindings")
-        if cur and GNOME_PATH in cur:
-            items = [x.strip().strip("'") for x in cur.strip("[]@as ").split(",") if x.strip()]
-            items = [x for x in items if x != GNOME_PATH]
-            _gsettings("set", GNOME_SCHEMA, "custom-keybindings",
-                       "[" + ", ".join(f"'{x}'" for x in items) + "]" if items else "@as []")
-            _gsettings("reset-recursively", f"{GNOME_SCHEMA}.custom-keybinding:{GNOME_PATH}")
+        for path in (GNOME_PATH, GNOME_FEED):
+            cur = _gsettings("get", GNOME_SCHEMA, "custom-keybindings")
+            if cur and path in cur:
+                items = [x.strip().strip("'") for x in cur.strip("[]@as ").split(",") if x.strip()]
+                items = [x for x in items if x != path]
+                _gsettings("set", GNOME_SCHEMA, "custom-keybindings",
+                           "[" + ", ".join(f"'{x}'" for x in items) + "]" if items else "@as []")
+                _gsettings("reset-recursively", f"{GNOME_SCHEMA}.custom-keybinding:{path}")
     print("Arachne shortcut removed (your colony save is kept).")
 
 
@@ -231,8 +237,11 @@ def agent():
             app.quit()
     server.newConnection.connect(on_conn)
 
-    def pressed():
-        toggle()
+    def pressed(which="b"):
+        if which == "f":
+            send(SERVER, "feed")
+        else:
+            toggle()
 
     keep = []
     if SYSTEM == "Windows":
@@ -243,13 +252,14 @@ def agent():
             def nativeEvent(self, kind, message):
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == 0x0312:      # WM_HOTKEY
-                    pressed()
+                    pressed("f" if msg.wParam == 2 else "b")
                     return True, 0
                 return False, 0
         w = HotkeyWindow()
         hwnd = int(w.winId())
         if not ctypes.windll.user32.RegisterHotKey(hwnd, 1, 0x0002 | 0x0004 | 0x4000, 0x42):
             print("Ctrl+Shift+B is already taken by another program")
+        ctypes.windll.user32.RegisterHotKey(hwnd, 2, 0x0002 | 0x0004 | 0x4000, 0x46)   # F
         keep.append(w)
     elif SYSTEM == "Darwin":
         keep.append(_mac_hotkey(pressed))
@@ -275,7 +285,15 @@ def _mac_hotkey(pressed):
         _fields_ = [("signature", c_uint32), ("id", c_uint32)]
 
     HANDLER = CFUNCTYPE(c_int32, c_void_p, c_void_p, c_void_p)
-    cb = HANDLER(lambda _next, _event, _data: (pressed(), 0)[1])
+    carbon.GetEventParameter.restype = c_int32
+
+    def on_key(_next, event, _data):
+        hk = EventHotKeyID()
+        carbon.GetEventParameter(c_void_p(event), fourcc("hkid"), fourcc("hkid"), None,
+                                 ctypes.sizeof(hk), None, byref(hk))
+        pressed("f" if hk.id == 2 else "b")
+        return 0
+    cb = HANDLER(on_key)
     carbon.GetApplicationEventTarget.restype = c_void_p
     target = carbon.GetApplicationEventTarget()
     spec = EventTypeSpec(fourcc("keyb"), 5)    # kEventClassKeyboard / kEventHotKeyPressed
@@ -284,7 +302,10 @@ def _mac_hotkey(pressed):
     # kVK_ANSI_B = 11; controlKey = 1<<12, shiftKey = 1<<9
     carbon.RegisterEventHotKey(11, (1 << 12) | (1 << 9), EventHotKeyID(fourcc("arac"), 1),
                                c_void_p(target), 0, byref(ref))
-    return (cb, spec, ref)
+    ref2 = c_void_p()                          # kVK_ANSI_F = 3
+    carbon.RegisterEventHotKey(3, (1 << 12) | (1 << 9), EventHotKeyID(fourcc("arac"), 2),
+                               c_void_p(target), 0, byref(ref2))
+    return (cb, spec, ref, ref2)
 
 
 def _x11_hotkey(pressed):
@@ -296,16 +317,18 @@ def _x11_hotkey(pressed):
     d = display.Display()
     root = d.screen().root
     code = d.keysym_to_keycode(XK.string_to_keysym("b"))
-    for extra in (0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask):
-        root.grab_key(code, X.ControlMask | X.ShiftMask | extra, True,
-                      X.GrabModeAsync, X.GrabModeAsync)
+    fcode = d.keysym_to_keycode(XK.string_to_keysym("f"))
+    for c in (code, fcode):
+        for extra in (0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask):
+            root.grab_key(c, X.ControlMask | X.ShiftMask | extra, True,
+                          X.GrabModeAsync, X.GrabModeAsync)
     d.sync()
 
     def poll():
         while d.pending_events():
             ev = d.next_event()
-            if ev.type == X.KeyPress and ev.detail == code:
-                pressed()
+            if ev.type == X.KeyPress and ev.detail in (code, fcode):
+                pressed("f" if ev.detail == fcode else "b")
     t = QTimer()
     t.timeout.connect(poll)
     t.start(100)
@@ -329,6 +352,10 @@ def main():
         setup()
     elif "--unsetup" in args:
         unsetup()
+    elif "--feed" in args or "--photo" in args or "--clip" in args:
+        cmd = "feed" if "--feed" in args else "photo" if "--photo" in args else "clip"
+        if not send(SERVER, cmd):
+            print("The colony isn't running (press Ctrl+Shift+B first).")
     else:
         print(f"Arachne colony {toggle(['--fresh'] if '--fresh' in args else [])}.")
 
